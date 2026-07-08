@@ -1,6 +1,6 @@
 <div align="center">
 
-# RepoRevive
+<img src="docs/logo/reporevive-lockup.png" alt="RepoRevive" width="320">
 
 **Paste a broken GitHub repo. Get back a diagnosis, an AI-attempted fix, and a working zip — or a clear explanation of why it couldn't be saved.**
 

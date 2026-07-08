@@ -1,6 +1,7 @@
 import DashboardStats from '../components/DashboardStats'
 import JobHistoryList from '../components/JobHistoryList'
 import ReviveWidget from '../components/ReviveWidget'
+import Logo from '../components/ui/Logo'
 import { useAuth } from '../context/AuthContext'
 import { useJobsList } from '../hooks/useJobsList'
 
@@ -9,20 +10,7 @@ function DashboardHeader({ email, onLogout }) {
     <header className="border-b border-border-subtle/50 bg-background/70 backdrop-blur-xl">
       <div className="section-container-wide flex h-16 items-center justify-between">
         <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path
-                d="M3 9l4 4 8-8"
-                stroke="#14F5C6"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          <span className="font-display text-lg font-bold tracking-tight">
-            Repo<span className="text-accent">Revive</span>
-          </span>
+          <Logo />
         </div>
 
         <div className="flex items-center gap-4">

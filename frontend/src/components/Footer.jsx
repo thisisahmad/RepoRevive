@@ -1,3 +1,5 @@
+import Logo from './ui/Logo'
+
 const footerLinks = {
   Product: ['Features', 'Pricing', 'Changelog', 'Docs'],
   Company: ['About', 'Blog', 'Careers', 'Contact'],
@@ -11,20 +13,7 @@ export default function Footer() {
         <div className="grid gap-12 md:grid-cols-2 lg:grid-cols-5">
           <div className="lg:col-span-2">
             <a href="#" className="flex items-center gap-2">
-              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10">
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-                  <path
-                    d="M3 9l4 4 8-8"
-                    stroke="#14F5C6"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </div>
-              <span className="font-display text-lg font-bold">
-                Repo<span className="text-accent">Revive</span>
-              </span>
+              <Logo />
             </a>
             <p className="mt-4 max-w-xs text-sm leading-relaxed text-muted">
               AI-powered tool that clones broken GitHub repos, fixes deprecated

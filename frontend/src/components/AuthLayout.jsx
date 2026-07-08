@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion'
 import { Link } from 'react-router-dom'
+import Logo from './ui/Logo'
 import TerminalShell from './ui/TerminalShell'
 
 export default function AuthLayout({ title, children, footer }) {
@@ -15,20 +16,7 @@ export default function AuthLayout({ title, children, footer }) {
         className="relative w-full max-w-md"
       >
         <Link to="/" className="mb-8 flex items-center justify-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path
-                d="M3 9l4 4 8-8"
-                stroke="#14F5C6"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          <span className="font-display text-lg font-bold tracking-tight">
-            Repo<span className="text-accent">Revive</span>
-          </span>
+          <Logo />
         </Link>
 
         <TerminalShell title={title}>

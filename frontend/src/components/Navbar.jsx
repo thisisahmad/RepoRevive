@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion'
+import Logo from './ui/Logo'
 import MagneticButton from './ui/MagneticButton'
 
 export default function Navbar() {
@@ -12,21 +13,8 @@ export default function Navbar() {
       className="fixed top-0 z-50 w-full border-b border-border-subtle/50 bg-background/70 backdrop-blur-xl"
     >
       <div className="section-container-wide flex h-16 items-center justify-between">
-        <a href="#" className="group flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10 transition-colors group-hover:bg-accent/20">
-            <svg width="18" height="18" viewBox="0 0 18 18" fill="none">
-              <path
-                d="M3 9l4 4 8-8"
-                stroke="#14F5C6"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </div>
-          <span className="font-display text-lg font-bold tracking-tight">
-            Repo<span className="text-accent">Revive</span>
-          </span>
+        <a href="#" className="flex items-center gap-2">
+          <Logo />
         </a>
 
         <div className="hidden items-center gap-8 md:flex">
