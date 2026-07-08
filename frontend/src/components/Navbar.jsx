@@ -42,7 +42,7 @@ export default function Navbar() {
         </div>
 
         <div className="flex items-center gap-3">
-          <MagneticButton variant="ghost" className="!px-4 !py-2 hidden sm:inline-flex">
+          <MagneticButton variant="ghost" className="!px-4 !py-2 hidden sm:inline-flex" to="/login">
             Sign in
           </MagneticButton>
           <MagneticButton variant="primary" className="!px-5 !py-2.5 !text-xs">

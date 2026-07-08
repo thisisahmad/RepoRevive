@@ -5,6 +5,9 @@ node_modules/
 dist/
 dist-ssr/
 
+# Backend runtime data (SQLite DB, job result zips)
+backend/storage/
+
 # Environment
 .env
 .env.*

@@ -12,6 +12,16 @@ npm install
 npm run dev
 ```
 
+## Backend
+
+Express + TypeScript API that clones repos into isolated Docker containers, detects the stack, runs them, and (soon) auto-fixes failures with an AI loop. See [backend/README.md](backend/README.md).
+
+```bash
+cd backend
+npm install
+npm run dev
+```
+
 ## Stack
 
 - React 19 + Vite

@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import TextReveal from './ui/TextReveal'
 import MagneticButton from './ui/MagneticButton'
 import CodeTerminal from './CodeTerminal'
+import HeroSideDecor from './HeroSideDecor'
 import { useIsMobile } from '../hooks/useIsMobile'
 
 const HeroScene = lazy(() => import('./HeroScene'))
@@ -41,6 +42,10 @@ function DesktopBackground() {
 export default function Hero() {
   const isMobile = useIsMobile()
 
+  const scrollToDemo = () => {
+    document.getElementById('live-demo')?.scrollIntoView({ behavior: 'smooth' })
+  }
+
   return (
     <section className="relative flex min-h-screen flex-col items-center justify-center overflow-hidden pt-24">
       {isMobile ? <MobileBackground /> : <DesktopBackground />}
@@ -49,6 +54,7 @@ export default function Hero() {
       <div className="pointer-events-none absolute inset-0 hero-spotlight" />
       <div className="pointer-events-none absolute inset-0 hero-vignette" />
       <div className="pointer-events-none absolute inset-0 noise-overlay" />
+      <HeroSideDecor />
 
       <div className="section-container relative z-10 flex flex-col items-center text-center">
         <motion.div
@@ -89,8 +95,8 @@ export default function Hero() {
           transition={{ delay: 1.05, duration: 0.7, ease: [0.16, 1, 0.3, 1] }}
           className="mt-10 flex flex-wrap items-center justify-center gap-4"
         >
-          <MagneticButton variant="primary">Try it free</MagneticButton>
-          <MagneticButton variant="secondary">See how it works</MagneticButton>
+          <MagneticButton variant="primary" onClick={scrollToDemo}>Try it free</MagneticButton>
+          <MagneticButton variant="secondary" onClick={scrollToDemo}>See how it works</MagneticButton>
         </motion.div>
 
         <div className="mt-20 w-full">

@@ -1,10 +1,4 @@
-import { useEffect, useRef } from 'react'
 import { motion } from 'framer-motion'
-import gsap from 'gsap'
-import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { useIsMobile } from '../hooks/useIsMobile'
-
-gsap.registerPlugin(ScrollTrigger)
 
 const steps = [
   {
@@ -54,60 +48,8 @@ const steps = [
 ]
 
 export default function HowItWorks() {
-  const sectionRef = useRef(null)
-  const lineRef = useRef(null)
-  const stepsRef = useRef([])
-  const isMobile = useIsMobile()
-
-  useEffect(() => {
-    if (isMobile || !sectionRef.current || !lineRef.current) return
-
-    const ctx = gsap.context(() => {
-      gsap.fromTo(
-        lineRef.current,
-        { strokeDashoffset: 1000 },
-        {
-          strokeDashoffset: 0,
-          ease: 'none',
-          scrollTrigger: {
-            trigger: sectionRef.current,
-            start: 'top 60%',
-            end: 'bottom 40%',
-            scrub: 1,
-          },
-        }
-      )
-
-      stepsRef.current.forEach((el, i) => {
-        if (!el) return
-        gsap.fromTo(
-          el,
-          { opacity: 0, y: 60 },
-          {
-            opacity: 1,
-            y: 0,
-            duration: 0.8,
-            ease: 'power3.out',
-            scrollTrigger: {
-              trigger: el,
-              start: 'top 80%',
-              toggleActions: 'play none none reverse',
-            },
-            delay: i * 0.1,
-          }
-        )
-      })
-    }, sectionRef)
-
-    return () => ctx.revert()
-  }, [isMobile])
-
   return (
-    <section
-      id="how-it-works"
-      ref={sectionRef}
-      className="relative py-section"
-    >
+    <section id="how-it-works" className="relative py-section">
       <div className="section-container">
         <motion.div
           initial={{ opacity: 0, y: 30 }}
@@ -127,45 +69,25 @@ export default function HowItWorks() {
         </motion.div>
 
         <div className="relative">
-          {!isMobile && (
-            <svg
-              className="absolute left-1/2 top-0 hidden h-full w-4 -translate-x-1/2 md:block"
-              preserveAspectRatio="none"
-            >
-              <line
-                ref={lineRef}
-                x1="50%"
-                y1="0"
-                x2="50%"
-                y2="100%"
-                stroke="url(#lineGradient)"
-                strokeWidth="2"
-                strokeDasharray="1000"
-                strokeDashoffset="1000"
-              />
-              <defs>
-                <linearGradient id="lineGradient" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="#14F5C6" stopOpacity="0" />
-                  <stop offset="20%" stopColor="#14F5C6" stopOpacity="0.8" />
-                  <stop offset="80%" stopColor="#14F5C6" stopOpacity="0.8" />
-                  <stop offset="100%" stopColor="#14F5C6" stopOpacity="0" />
-                </linearGradient>
-              </defs>
-            </svg>
-          )}
+          <motion.div
+            initial={{ scaleY: 0 }}
+            whileInView={{ scaleY: 1 }}
+            viewport={{ once: true, margin: '-100px' }}
+            transition={{ duration: 1, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute left-1/2 top-0 hidden h-full w-px origin-top -translate-x-1/2 bg-gradient-to-b from-accent/0 via-accent/50 to-accent/0 md:block"
+          />
 
           <div className="space-y-16 md:space-y-24">
             {steps.map((step, i) => (
               <motion.div
                 key={step.number}
-                ref={(el) => (stepsRef.current[i] = el)}
-                initial={isMobile ? { opacity: 0, y: 40 } : undefined}
-                whileInView={isMobile ? { opacity: 1, y: 0 } : undefined}
+                initial={{ opacity: 0, y: 40 }}
+                whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: '-80px' }}
                 transition={{ duration: 0.6, delay: i * 0.1, ease: [0.16, 1, 0.3, 1] }}
                 className={`flex flex-col items-center gap-8 md:flex-row ${
                   i % 2 === 1 ? 'md:flex-row-reverse' : ''
-                } ${isMobile ? '' : 'opacity-0'}`}
+                }`}
               >
                 <div className="flex-1 md:text-right" style={i % 2 === 1 ? { textAlign: 'left' } : {}}>
                   <span className="font-mono text-sm text-accent">{step.number}</span>

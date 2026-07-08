@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react'
 import { motion } from 'framer-motion'
+import { Link } from 'react-router-dom'
 
 export default function MagneticButton({
   children,
@@ -7,6 +8,7 @@ export default function MagneticButton({
   variant = 'primary',
   onClick,
   href,
+  to,
 }) {
   const ref = useRef(null)
   const [position, setPosition] = useState({ x: 0, y: 0 })
@@ -33,8 +35,8 @@ export default function MagneticButton({
       'text-muted hover:text-foreground',
   }
 
-  const Component = href ? 'a' : 'button'
-  const props = href ? { href } : { onClick, type: 'button' }
+  const Component = to ? Link : href ? 'a' : 'button'
+  const props = to ? { to } : href ? { href } : { onClick, type: 'button' }
 
   return (
     <motion.div
