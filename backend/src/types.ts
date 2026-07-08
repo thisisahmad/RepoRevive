@@ -1,10 +1,12 @@
+import { FixAttempt } from './ai/types';
+
 export type JobStatus =
   | 'queued'
   | 'cloning'
   | 'detecting'
   | 'installing'
   | 'running'
-  | 'fixing' // AI fix loop in progress (feature 4)
+  | 'fixing' // AI diagnose+fix loop in progress
   | 'succeeded'
   | 'failed'
   | 'unsupported_stack';
@@ -22,22 +24,13 @@ export interface StackInfo {
   entryPoint: string | null;
 }
 
-export interface Attempt {
-  attemptNumber: number;
-  errorBefore: string;
-  filesChanged: string[];
-  diff: string;
-  explanation: string;
-  timestamp: string;
-}
-
 export interface Job {
   id: string;
   userId: string | null;
   repoUrl: string;
   status: JobStatus;
   stack: StackInfo | null;
-  attempts: Attempt[];
+  attempts: FixAttempt[];
   /** last error log snippet, for polling clients */
   error: string | null;
   createdAt: string;

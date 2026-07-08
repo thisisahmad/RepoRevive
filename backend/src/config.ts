@@ -18,6 +18,12 @@ export const config = {
     node: 'node:20',
     python: 'python:3.12',
   },
+
+  ai: {
+    model: 'gpt-4o-mini',
+    maxFixAttempts: 5,
+    maxToolRoundsPerAttempt: 8,
+  },
 } as const;
 
 export const resultsDir = path.join(config.storageDir, 'results');

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { createJob, isTerminalStatus } from '../lib/api'
+import { Link } from 'react-router-dom'
+import { createJob, downloadJobZip, isTerminalStatus } from '../lib/api'
 import { takePendingRepoUrl } from '../lib/pendingRepo'
 import { useJobPolling } from '../hooks/useJobPolling'
 import RepoUrlForm from './RepoUrlForm'
@@ -98,6 +99,66 @@ function StackSummary({ stack }) {
   )
 }
 
+/** repoUrl is normalized to https://github.com/<owner>/<repo>.git — pull out <repo>. */
+function repoNameFromUrl(repoUrl) {
+  const match = repoUrl.match(/\/([^/]+?)(?:\.git)?$/)
+  return match ? match[1] : 'repo'
+}
+
+function DownloadButton({ jobId, repoUrl }) {
+  const [isDownloading, setIsDownloading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleDownload = async () => {
+    if (isDownloading) return
+    setIsDownloading(true)
+    setError(null)
+    try {
+      const blob = await downloadJobZip(jobId)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `reporevive-${repoNameFromUrl(repoUrl)}.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setIsDownloading(false)
+    }
+  }
+
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={handleDownload}
+        disabled={isDownloading}
+        className="inline-flex items-center gap-2 rounded-lg bg-accent px-5 py-2.5 font-display text-sm font-semibold text-background shadow-glow-accent transition-opacity hover:shadow-glow-lg disabled:opacity-60"
+      >
+        {isDownloading && (
+          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-background/40 border-t-background" />
+        )}
+        {isDownloading ? 'Preparing download…' : 'Download ZIP'}
+      </button>
+      {error && <p className="mt-2 font-mono text-xs text-error">{error}</p>}
+    </div>
+  )
+}
+
+function ViewReportLink({ jobId }) {
+  return (
+    <Link
+      to={`/jobs/${jobId}/report`}
+      className="inline-flex items-center gap-2 rounded-lg border border-border-subtle px-5 py-2.5 font-mono text-sm text-foreground transition-colors hover:border-accent/40 hover:text-accent"
+    >
+      View Report
+    </Link>
+  )
+}
+
 function ResultPanel({ job }) {
   if (job.status === 'succeeded') {
     return (
@@ -109,6 +170,7 @@ function ResultPanel({ job }) {
           <span className="font-mono text-sm font-medium">It runs.</span>
         </div>
         <StackSummary stack={job.stack} />
+        <DownloadButton jobId={job.id} repoUrl={job.repoUrl} />
       </div>
     )
   }
@@ -139,6 +201,7 @@ function ResultPanel({ job }) {
       <p className="font-mono text-xs text-muted-dark">
         The AI auto-fix loop isn't wired up yet — this MVP stops here for now.
       </p>
+      <ViewReportLink jobId={job.id} />
     </div>
   )
 }

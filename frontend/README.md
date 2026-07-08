@@ -1,16 +1,33 @@
-# React + Vite
+# RepoRevive Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React 19 + Vite app: the marketing landing page, auth pages, and the dashboard where jobs actually run.
+See the [root README](../README.md) for the full project overview.
 
-Currently, two official plugins are available:
+## Setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+cd frontend
+npm install
+npm run dev   # http://localhost:5173, expects the backend on http://localhost:3000
+```
 
-## React Compiler
+Set `VITE_API_URL` in `.env` if the backend runs somewhere other than `localhost:3000`.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Structure
 
-## Expanding the Oxlint configuration
+```
+src/
+├── pages/          # LandingPage, LoginPage, RegisterPage, DashboardPage
+├── components/      # ReviveWidget (job runner), JobHistoryList, DashboardStats,
+│                     # Hero + landing sections, shared UI (TerminalShell, RepoUrlForm)
+├── context/          # AuthContext — token/user in localStorage
+├── hooks/            # useJobPolling, useJobsList
+└── lib/              # api client, job status labels, pending-repo sessionStorage handoff
+```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+## Notable behavior
+
+- Pasting a repo URL on the landing page while logged out saves it to `sessionStorage` and redirects to
+  `/login`; signing in (or registering) picks it back up and revives it automatically on the dashboard.
+- The dashboard polls job status every ~1.5s and job history every ~3s — no websockets, just plain
+  polling, which is enough for a single-job-at-a-time demo tool.

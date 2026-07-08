@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
+import { FixAttempt } from '../ai/types';
 import { db } from '../db';
-import { Attempt, Job } from '../types';
+import { Job } from '../types';
 
 interface JobRow {
   id: string;
@@ -62,7 +63,7 @@ export function updateJob(id: string, patch: JobPatch): void {
   db.prepare(`UPDATE jobs SET ${cols.join(', ')} WHERE id = @id`).run(vals);
 }
 
-export function appendAttempt(id: string, attempt: Attempt): void {
+export function appendAttempt(id: string, attempt: FixAttempt): void {
   const job = getJob(id);
   if (!job) return;
   updateJob(id, { attempts: [...job.attempts, attempt] });

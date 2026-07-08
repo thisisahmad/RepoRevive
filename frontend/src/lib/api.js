@@ -61,3 +61,16 @@ export function getJob(id) {
 export function listJobs() {
   return request('/api/jobs', { auth: true })
 }
+
+/** Binary response, so it can't go through request()'s res.json() path. */
+export async function downloadJobZip(id) {
+  const res = await fetch(`${API_URL}/api/jobs/${id}/download`, {
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+  })
+  if (!res.ok) {
+    if (res.status === 401) onUnauthorized?.()
+    const data = await readJson(res)
+    throw new Error(data?.error || `Download failed (${res.status})`)
+  }
+  return res.blob()
+}

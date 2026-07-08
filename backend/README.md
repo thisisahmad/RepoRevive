@@ -1,81 +1,104 @@
 # RepoRevive Backend
 
-Node.js + Express + TypeScript API that takes a public GitHub repo URL, clones and runs it inside an isolated Docker container, auto-fixes failures with an AI agent loop (feature 4, upcoming), and produces a plain-English report with diffs.
+Node.js + Express + TypeScript API that clones a public GitHub repo into an isolated Docker container,
+detects its stack, installs and runs it, diagnoses and attempts to fix failures with OpenAI, and
+produces a downloadable result plus a plain-English report.
+
+See the [root README](../README.md) for the full architecture, API reference, and feature list — this
+file covers backend-specific setup and internals only.
 
 ## Requirements
 
 - Node.js 20+
 - Docker Desktop running (Linux containers)
+- An OpenAI API key (optional — without one, the diagnosis/fix loop degrades gracefully to `unknown`
+  and jobs still fail cleanly rather than hanging)
 
 ## Setup
 
 ```bash
 cd backend
 npm install
-copy .env.example .env   # then edit if needed
+cp .env.example .env   # then edit JWT_SECRET / OPENAI_API_KEY
 npm run dev
 ```
+
+`npm run build && npm start` runs the compiled output instead of `tsx`.
 
 ## Project structure
 
 ```
 backend/
-├── package.json
-├── tsconfig.json
-├── .env.example
-├── storage/                  # created at runtime (gitignored)
-│   ├── reporevive.db         # SQLite
-│   └── results/<jobId>.zip   # feature 6
+├── package.json, tsconfig.json, .env.example
+├── storage/                    # created at runtime (gitignored)
+│   ├── reporevive.db           # SQLite — users, jobs
+│   └── results/<jobId>.zip
 └── src/
-    ├── index.ts              # entry point: init dirs/db, start server
-    ├── app.ts                # express app wiring
-    ├── config.ts             # env + tunables (timeouts, images, limits)
-    ├── types.ts              # Job, Attempt, StackInfo, JobStatus
-    ├── db/
-    │   └── index.ts          # better-sqlite3 init + schema (users, jobs)
+    ├── index.ts, app.ts        # entry point + express wiring
+    ├── config.ts                # env vars, timeouts, image names, AI model/attempt caps
+    ├── types.ts                 # Job, StackInfo, JobStatus
+    ├── db/                      # better-sqlite3 init + schema
+    ├── auth/                    # register/login, JWT middleware
     ├── jobs/
-    │   ├── routes.ts         # POST /api/jobs, GET /api/jobs/:id
-    │   ├── store.ts          # job CRUD against SQLite
-    │   ├── validate.ts       # strict public-github-URL validation
-    │   └── runner.ts         # in-process async queue (returns 202 fast)
+    │   ├── routes.ts            # POST /api/jobs, GET /:id, /:id/download, /:id/report(.md)
+    │   ├── store.ts             # job CRUD against SQLite
+    │   ├── validate.ts          # strict public-github-URL validation
+    │   └── runner.ts            # in-process async queue (returns 202 fast)
     ├── stack/
-    │   └── detect.ts         # feature 2: Node/Python + pkg manager + entry point
+    │   └── detect.ts            # Node (npm/yarn/pnpm) + Python (pip/poetry) stack detection
     ├── sandbox/
-    │   ├── docker.ts         # dockerode helpers: create/exec/destroy, limits
-    │   └── pipeline.ts       # feature 3: clone → detect → install → run
-    ├── ai/                   # feature 4: fix loop (read_file/write_file/run_command)
-    ├── report/               # feature 5: JSON + markdown report rendering
-    └── auth/                 # feature 7: register/login, JWT middleware
+    │   ├── docker.ts            # dockerode helpers: create/exec/destroy, archive extraction
+    │   └── pipeline.ts          # orchestrator — clone → detect → install → run → diagnose+fix
+    ├── ai/
+    │   ├── client.ts            # OpenAI client singleton
+    │   ├── diagnose.ts          # classifies why install/run failed
+    │   ├── upgradeSuggest.ts    # suggests a specific dependency upgrade path
+    │   ├── fixLoop.ts           # tool-calling fix attempt (read_file/write_file/run_command)
+    │   ├── types.ts             # DiagnosisResult, SuggestedUpgrade, FixAttempt, ToolExecutors
+    │   └── prompts/             # one exported constant per system prompt
+    └── report/
+        ├── build.ts             # shapes a Job into the report's JSON structure
+        └── markdown.ts          # renders that structure as Markdown
 ```
 
-## API (so far)
+Nothing under `src/ai/` imports `dockerode`. `pipeline.ts` builds a `ToolExecutors` object backed by
+real `docker exec` calls and passes it in as a plain argument — that's the only place Docker and AI
+calls meet.
 
-| Method | Path | Description |
-|---|---|---|
-| POST | `/api/jobs` | `{ "repoUrl": "https://github.com/owner/repo" }` → `202 { id, status }` |
-| GET | `/api/jobs/:id` | Poll status, detected stack, attempts, last error |
-| GET | `/health` | Liveness check |
+## API
 
-Job status flow: `queued → cloning → detecting → installing → running → succeeded | failed | unsupported_stack` (`fixing` arrives with feature 4).
+See the [root README's API reference](../README.md#api-reference) for the full table. All
+`/api/jobs/*` routes require `Authorization: Bearer <token>` and are scoped to the requesting user.
 
-## How a job runs (features 2 + 3)
+## How a job runs
 
-1. **Detect pass** — a throwaway `alpine/git` container shallow-clones the repo to `/workspace/job-<uuid>` and the repo root is inspected: `package.json` → Node (npm/yarn/pnpm by lockfile), `requirements.txt`/`pyproject.toml` → Python (pip/poetry). Start command comes from `scripts.start`, falling back to `index.js`/`server.js`/`app.py`/`main.py` etc. Anything else → `unsupported_stack`.
-2. **Run pass** — a fresh `node:20` or `python:3.12` container (1 GiB RAM, 1 CPU, pids limit, `no-new-privileges`, no host mounts) clones again, runs the install command, then the start command under `timeout 18`. Exit `124` (still alive after 18s, i.e. a server) or `0` (clean quick exit, i.e. a script) = success; anything else = failure with captured stderr.
-3. Containers are always destroyed in `finally` — except (future) when handing off to the AI fix loop.
+1. **Detect** — a throwaway `alpine/git` container shallow-clones the repo and the root is inspected:
+   `package.json` → Node, `requirements.txt`/`pyproject.toml` → Python. Monorepos and Pipenv repos are
+   recognized and rejected with a specific message rather than attempted.
+2. **Run** — a fresh `node:20` or `python:3.12` container (1 GiB RAM, 1 CPU, pids limit,
+   `no-new-privileges`, no host mounts) installs, then runs the start command under a timeout. Still
+   alive when the timer fires, or a clean quick exit — both count as success.
+3. **On failure** — `diagnoseFailure()` classifies the error (deprecated package, breaking change,
+   native build failure, missing env var, version mismatch, unknown), optionally suggests a specific
+   upgrade, then `runFixAttempt()` gets a bounded tool-calling session to fix it. Reinstall + rerun,
+   repeat up to 5 times. Diagnosis is a pre-step, not an attempt — it doesn't count against the cap.
+4. **On success** — the workspace is zipped inside the container (`apt-get install zip`, since neither
+   base image ships it) and copied out via Docker's archive API before the container is destroyed.
 
 ## Quick test
 
 ```bash
-# should succeed (tiny Node repo) — first run pulls images, be patient
-curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" -d "{\"repoUrl\":\"https://github.com/octocat/Hello-World\"}"
+# succeeds via npm
+curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" -d "{\"repoUrl\":\"https://github.com/heroku/node-js-sample\"}"
 
-# poll it
-curl -s http://localhost:3000/api/jobs/<id>
+# a real monorepo — should report the specific reason, not a generic failure
+curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" -d "{\"repoUrl\":\"https://github.com/vitejs/vite\"}"
 
-# validation rejects
-curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" -d "{\"repoUrl\":\"https://gitlab.com/foo/bar\"}"
-curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" -d "{\"repoUrl\":\"git@github.com:foo/bar.git\"}"
+# validation rejects non-GitHub / SSH URLs before a job is ever created
+curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" \
+  -H "Authorization: Bearer <token>" -d "{\"repoUrl\":\"https://gitlab.com/foo/bar\"}"
 ```
 
-`octocat/Hello-World` has no manifest, so it exercises clone + detection and lands on `unsupported_stack`. For a full success path try any small Node repo with a `start` script, e.g. `https://github.com/heroku/node-js-sample`.
+You'll need a real account first — `POST /api/auth/register` — to get a token for these.

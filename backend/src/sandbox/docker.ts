@@ -1,5 +1,6 @@
 import Docker from 'dockerode';
 import { Writable } from 'stream';
+import * as tar from 'tar-stream';
 
 // docker-modem picks the right default per platform:
 // //./pipe/docker_engine on Windows, /var/run/docker.sock elsewhere.
@@ -131,6 +132,38 @@ export async function execInContainer(
     stderr: Buffer.concat(stderrChunks).toString('utf8'),
     timedOut,
   };
+}
+
+/**
+ * Pulls a single file out of the container via Docker's archive endpoint
+ * (no in-container tooling required) and returns its raw bytes. Docker
+ * always wraps the result in a tar stream, even for one file, so we unwrap
+ * it with tar-stream rather than shelling out to `tar`.
+ */
+export async function copyFileFromContainer(container: Docker.Container, containerPath: string): Promise<Buffer> {
+  const archiveStream: NodeJS.ReadableStream = await container.getArchive({ path: containerPath });
+
+  return new Promise((resolve, reject) => {
+    const extract = tar.extract();
+    let fileBuffer: Buffer | null = null;
+
+    extract.on('entry', (_header, stream, next) => {
+      const chunks: Buffer[] = [];
+      stream.on('data', (chunk) => chunks.push(chunk));
+      stream.on('end', () => {
+        fileBuffer = Buffer.concat(chunks);
+        next();
+      });
+      stream.resume();
+    });
+    extract.on('finish', () => {
+      if (fileBuffer) resolve(fileBuffer);
+      else reject(new Error(`no file found at ${containerPath}`));
+    });
+    extract.on('error', reject);
+
+    archiveStream.pipe(extract);
+  });
 }
 
 export async function destroyContainer(container: Docker.Container): Promise<void> {
