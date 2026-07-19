@@ -172,7 +172,10 @@ function ResultPanel({ job }) {
           <span className="font-mono text-sm font-medium">It runs.</span>
         </div>
         <StackSummary stack={job.stack} />
-        <DownloadButton jobId={job.id} repoUrl={job.repoUrl} />
+        <div className="flex flex-wrap items-center gap-3">
+          <DownloadButton jobId={job.id} repoUrl={job.repoUrl} />
+          <ViewReportLink jobId={job.id} />
+        </div>
       </div>
     )
   }
