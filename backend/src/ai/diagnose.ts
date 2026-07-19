@@ -1,5 +1,6 @@
 import { openai } from './client';
 import { config } from '../config';
+import { logEvent } from '../utils/logger';
 import { DIAGNOSIS_SYSTEM_PROMPT } from './prompts/diagnosisPrompt';
 import { suggestUpgrade } from './upgradeSuggest';
 import { DiagnosisCategory, DiagnosisResult } from './types';
@@ -92,6 +93,8 @@ export async function diagnoseFailure(
   errorLog: string,
   manifestContent: string
 ): Promise<DiagnosisResult> {
+  logEvent(jobId, 'diagnosis_started', { containerId: containerId.slice(0, 12), errorTail: errorLog });
+
   const classification = await classifyFailure(errorLog, manifestContent);
 
   const suggestedUpgrade = UPGRADE_ELIGIBLE_CATEGORIES.includes(classification.category)
@@ -99,6 +102,14 @@ export async function diagnoseFailure(
     : null;
 
   console.log(`[diagnose] job=${jobId} container=${containerId.slice(0, 12)} category=${classification.category}`);
+
+  logEvent(jobId, 'diagnosis_completed', {
+    category: classification.category,
+    confidence: classification.confidence,
+    affectedPackage: classification.affectedPackage,
+    assumptions: classification.assumptions,
+    suggestedUpgrade,
+  });
 
   return { ...classification, suggestedUpgrade };
 }

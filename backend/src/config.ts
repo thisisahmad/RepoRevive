@@ -31,3 +31,4 @@ export const config = {
 
 export const resultsDir = path.join(config.storageDir, 'results');
 export const dbPath = path.join(config.storageDir, 'reporevive.db');
+export const logsDir = path.join(config.storageDir, 'logs');

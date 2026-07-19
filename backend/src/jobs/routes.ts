@@ -4,6 +4,7 @@ import { requireAuth } from '../auth/middleware';
 import { buildReport } from '../report/build';
 import { renderReportMarkdown } from '../report/markdown';
 import { Job } from '../types';
+import { logEvent, readJobLog } from '../utils/logger';
 import { enqueueJob } from './runner';
 import { createJob, getJob, listJobsByUser } from './store';
 import { validateGithubUrl } from './validate';
@@ -30,6 +31,7 @@ router.post('/', (req, res) => {
     return res.status(400).json({ error: result.reason });
   }
   const job = createJob(result.value.normalizedUrl, req.userId!);
+  logEvent(job.id, 'job_created', { repoUrl: job.repoUrl });
   enqueueJob(job.id);
   return res.status(202).json({ id: job.id, status: job.status });
 });
@@ -59,6 +61,15 @@ router.get('/:id/download', (req, res) => {
     return res.status(404).json({ error: 'no result available for this job' });
   }
   return res.download(job.resultZipPath, `reporevive-${repoNameFromUrl(job.repoUrl)}.zip`);
+});
+
+// GET /api/jobs/:id/logs -> the job's full structured log trace as JSON (owner only)
+router.get('/:id/logs', (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job || job.userId !== req.userId) {
+    return res.status(404).json({ error: 'job not found' });
+  }
+  return res.json({ jobId: job.id, events: readJobLog(job.id) });
 });
 
 // GET /api/jobs/:id/report -> structured JSON report (owner only)

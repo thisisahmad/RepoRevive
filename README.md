@@ -229,6 +229,7 @@ All `/api/jobs/*` routes require `Authorization: Bearer <token>` and are scoped 
 | `GET` | `/api/jobs/:id/download` | Streams the result zip (`succeeded` jobs only) |
 | `GET` | `/api/jobs/:id/report` | Structured JSON report — diagnosis, diffs, final outcome |
 | `GET` | `/api/jobs/:id/report.md` | Same report as a downloadable Markdown file |
+| `GET` | `/api/jobs/:id/logs` | Full structured log trace of the job as JSON (`{ jobId, events[] }`) |
 | `GET` | `/health` | Liveness check |
 
 ## Job lifecycle

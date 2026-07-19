@@ -1,6 +1,7 @@
 import { createPatch } from 'diff';
 import OpenAI from 'openai';
 import { config } from '../config';
+import { logEvent } from '../utils/logger';
 import { openai } from './client';
 import { FIX_LOOP_SYSTEM_PROMPT } from './prompts/fixLoopPrompt';
 import { DiagnosisResult, FixLoopResult, Reflection, ToolExecutors } from './types';
@@ -87,11 +88,20 @@ function reflectionContextBlock(reflection: Reflection): string {
  * by the last one rather than blind.
  */
 export async function runFixAttempt(
+  jobId: string,
+  attemptNumber: number,
   errorLog: string,
   diagnosis: DiagnosisResult,
   tools: ToolExecutors,
   priorReflection?: Reflection | null
 ): Promise<FixLoopResult> {
+  logEvent(jobId, 'fix_attempt_started', {
+    attemptNumber,
+    diagnosisCategory: diagnosis.category,
+    diagnosisConfidence: diagnosis.confidence,
+    steeredByReflection: Boolean(priorReflection),
+  });
+
   let systemPrompt = `${FIX_LOOP_SYSTEM_PROMPT}\n\n--- Diagnosis for this failure ---\n${diagnosisContextBlock(diagnosis)}`;
   if (priorReflection) {
     systemPrompt += `\n\n--- Reflection on the previous fix attempt ---\n${reflectionContextBlock(priorReflection)}`;
@@ -133,11 +143,19 @@ export async function runFixAttempt(
     }`;
   }
 
-  return {
+  const result: FixLoopResult = {
     filesChanged: [...changedFiles.keys()],
     diff: buildDiff(changedFiles),
     explanation: explanation || 'The model ran out of tool-call rounds before confirming a fix.',
   };
+
+  logEvent(jobId, 'fix_attempt_completed', {
+    attemptNumber,
+    filesChanged: result.filesChanged,
+    outcome: result.explanation,
+  });
+
+  return result;
 }
 
 async function runTool(

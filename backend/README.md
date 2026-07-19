@@ -40,7 +40,7 @@ backend/
     ├── db/                      # better-sqlite3 init + schema
     ├── auth/                    # register/login, JWT middleware
     ├── jobs/
-    │   ├── routes.ts            # POST /api/jobs, GET /:id, /:id/download, /:id/report(.md)
+    │   ├── routes.ts            # POST /api/jobs, GET /:id, /:id/download, /:id/logs, /:id/report(.md)
     │   ├── store.ts             # job CRUD against SQLite
     │   ├── validate.ts          # strict public-github-URL validation
     │   └── runner.ts            # in-process async queue (returns 202 fast)
@@ -56,6 +56,8 @@ backend/
     │   ├── fixLoop.ts           # tool-calling fix attempt (read_file/write_file/run_command)
     │   ├── types.ts             # DiagnosisResult, SuggestedUpgrade, FixAttempt, ToolExecutors
     │   └── prompts/             # one exported constant per system prompt
+    ├── utils/
+    │   └── logger.ts            # structured per-job JSON logging (console + storage/logs/job-<id>.log)
     └── report/
         ├── build.ts             # shapes a Job into the report's JSON structure
         └── markdown.ts          # renders that structure as Markdown

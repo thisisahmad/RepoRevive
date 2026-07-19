@@ -10,6 +10,7 @@ import { reflectOnAttempt } from '../ai/reflect';
 import { Reflection, ToolExecutors } from '../ai/types';
 import { appendAttempt, getJob, updateJob } from '../jobs/store';
 import { detectStack, ScopedExec } from '../stack/detect';
+import { logEvent } from '../utils/logger';
 import { StackInfo } from '../types';
 import { copyFileFromContainer, createJobContainer, destroyContainer, execInContainer, ExecResult } from './docker';
 
@@ -31,6 +32,7 @@ function shellQuote(command: string): string {
 
 function fail(jobId: string, error: string): void {
   updateJob(jobId, { status: 'failed', error });
+  logEvent(jobId, 'job_failed', { error });
 }
 
 function combinedLog(result: ExecResult): string {
@@ -315,10 +317,11 @@ export async function attemptFix(
     // the report shows a shaky guess as such rather than as a certain call.
     const lowConfidenceDiagnosis = diagnosis.confidence < config.ai.lowConfidenceThreshold;
     const errorBefore = currentError;
-    const fixResult = await runFixAttempt(currentError, diagnosis, tools, priorReflection);
+    const fixResult = await runFixAttempt(jobId, attemptNumber, currentError, diagnosis, tools, priorReflection);
 
     // ---- re-test: reinstall, then rerun (unless install itself failed) ----
     updateJob(jobId, { status: 'installing' });
+    logEvent(jobId, 'install_started', { attemptNumber, command: stack.installCommand, phase: 'retest' });
     const install = await execInContainer(container, ['sh', '-c', stack.installCommand], {
       workdir,
       timeoutMs: config.installTimeoutMs,
@@ -332,9 +335,12 @@ export async function attemptFix(
       outcomeError = install.timedOut
         ? `Install timed out after ${config.installTimeoutMs / 1000}s (${stack.installCommand})`
         : `Install failed (${stack.installCommand}):\n${combinedLog(install)}`;
+      logEvent(jobId, 'install_failed', { attemptNumber, phase: 'retest', error: outcomeError });
     } else {
+      logEvent(jobId, 'install_succeeded', { attemptNumber, phase: 'retest', command: stack.installCommand });
       updateJob(jobId, { status: 'running' });
       retestCommand = stack.startCommand!;
+      logEvent(jobId, 'run_started', { attemptNumber, command: stack.startCommand, phase: 'retest' });
       const run = await execInContainer(
         container,
         ['sh', '-c', `timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand!)}`],
@@ -342,8 +348,10 @@ export async function attemptFix(
       );
       if (run.exitCode === 0 || run.exitCode === 124) {
         succeeded = true;
+        logEvent(jobId, 'run_succeeded', { attemptNumber, phase: 'retest', exitCode: run.exitCode });
       } else {
         outcomeError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
+        logEvent(jobId, 'run_failed', { attemptNumber, phase: 'retest', exitCode: run.exitCode, error: outcomeError });
       }
     }
 
@@ -357,6 +365,15 @@ export async function attemptFix(
       retestCommand,
       succeeded,
       outcomeError,
+    });
+
+    logEvent(jobId, 'reflection_completed', {
+      attemptNumber,
+      shouldRetry: reflection.shouldRetry,
+      confidence: reflection.confidence,
+      attemptFailed: reflection.attemptFailed,
+      failureReason: reflection.failureReason,
+      nextStrategy: reflection.nextStrategy,
     });
 
     appendAttempt(jobId, {
@@ -429,25 +446,37 @@ export async function processJob(jobId: string): Promise<void> {
       // these are structural problems the AI tools shouldn't be turned loose on.
       const validation = await validateRepoInputs(scopedExec);
       if (validation.kind !== 'ok') {
+        const eventByKind = {
+          invalid_manifest: 'manifest_invalid',
+          conflicting_manifests: 'manifest_conflict',
+          engine_version_mismatch: 'engine_mismatch',
+        } as const;
         updateJob(jobId, { status: validation.kind, error: validation.message });
+        logEvent(jobId, eventByKind[validation.kind], { status: validation.kind, message: validation.message });
         return;
       }
 
       const detected = await detectStack(scopedExec);
 
       if (detected.kind === 'not_found') {
-        updateJob(jobId, {
-          status: 'unsupported_stack',
-          error:
-            'No package.json, requirements.txt, or pyproject.toml found in the repo root. Only Node and Python projects are supported in this MVP.',
-        });
+        const message =
+          'No package.json, requirements.txt, or pyproject.toml found in the repo root. Only Node and Python projects are supported in this MVP.';
+        updateJob(jobId, { status: 'unsupported_stack', error: message });
+        logEvent(jobId, 'stack_detection_failed', { reason: 'not_found', message });
         return;
       }
       if (detected.kind === 'unsupported_variant') {
         updateJob(jobId, { status: 'unsupported_stack', error: detected.reason });
+        logEvent(jobId, 'stack_detection_failed', { reason: 'unsupported_variant', message: detected.reason });
         return;
       }
       stack = detected.stack;
+      logEvent(jobId, 'stack_detected', {
+        language: stack.language,
+        packageManager: stack.packageManager,
+        entryPoint: stack.entryPoint,
+        noLockfile: stack.noLockfile,
+      });
     } finally {
       await destroyContainer(detectContainer);
     }
@@ -481,6 +510,7 @@ export async function processJob(jobId: string): Promise<void> {
     }
 
     updateJob(jobId, { status: 'installing' });
+    logEvent(jobId, 'install_started', { command: stack.installCommand, phase: 'initial' });
     const install = await execInContainer(container, ['sh', '-c', stack.installCommand], {
       workdir,
       timeoutMs: config.installTimeoutMs,
@@ -493,9 +523,12 @@ export async function processJob(jobId: string): Promise<void> {
       lastError = install.timedOut
         ? `Install timed out after ${config.installTimeoutMs / 1000}s (${stack.installCommand})`
         : `Install failed (${stack.installCommand}):\n${combinedLog(install)}`;
+      logEvent(jobId, 'install_failed', { phase: 'initial', error: lastError });
       fixResult = await attemptFix(jobId, container, workdir, stack, lastError);
     } else {
+      logEvent(jobId, 'install_succeeded', { phase: 'initial', command: stack.installCommand });
       updateJob(jobId, { status: 'running' });
+      logEvent(jobId, 'run_started', { command: stack.startCommand, phase: 'initial' });
       // `timeout <n>` inside the container: exit 124 means the process was
       // still alive when the timer fired (a server that stayed up = success);
       // exit 0 means it finished cleanly and quickly (a script = also success);
@@ -507,15 +540,19 @@ export async function processJob(jobId: string): Promise<void> {
       );
       if (run.exitCode === 0 || run.exitCode === 124) {
         fixResult = { succeeded: true, unfixable: false };
+        logEvent(jobId, 'run_succeeded', { phase: 'initial', exitCode: run.exitCode });
       } else {
         lastError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
+        logEvent(jobId, 'run_failed', { phase: 'initial', exitCode: run.exitCode, error: lastError });
         fixResult = await attemptFix(jobId, container, workdir, stack, lastError);
       }
     }
 
     if (!fixResult.succeeded) {
       if (fixResult.unfixable) {
-        updateJob(jobId, { status: 'failed_unfixable', error: lastError ?? 'The failure was judged unfixable within the current approach.' });
+        const error = lastError ?? 'The failure was judged unfixable within the current approach.';
+        updateJob(jobId, { status: 'failed_unfixable', error });
+        logEvent(jobId, 'job_failed_unfixable', { error });
       } else {
         fail(jobId, lastError ?? 'Unknown failure.');
       }
@@ -539,6 +576,10 @@ export async function processJob(jobId: string): Promise<void> {
     fs.writeFileSync(zipPath, zipBuffer);
 
     updateJob(jobId, { status: 'succeeded', error: null, resultZipPath: zipPath });
+    logEvent(jobId, 'job_succeeded', {
+      resultZip: path.basename(zipPath),
+      attempts: getJob(jobId)?.attempts.length ?? 0,
+    });
   } finally {
     await destroyContainer(container);
   }
