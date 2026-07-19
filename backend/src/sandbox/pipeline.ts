@@ -12,9 +12,49 @@ import { appendAttempt, getJob, updateJob } from '../jobs/store';
 import { detectStack, ScopedExec } from '../stack/detect';
 import { logEvent } from '../utils/logger';
 import { StackInfo } from '../types';
-import { copyFileFromContainer, createJobContainer, destroyContainer, execInContainer, ExecResult } from './docker';
+import {
+  copyFileFromContainer,
+  createJobContainer,
+  destroyContainer,
+  execInContainer,
+  ExecResult,
+  forceRemoveContainerByName,
+} from './docker';
 
 const RESULT_ZIP_PATH_IN_CONTAINER = '/tmp/result.zip';
+
+/**
+ * Job ids the user has asked to cancel. Once a job is in here:
+ *  - `setStatus` no-ops, so a late phase update can't overwrite 'cancelled'
+ *  - the fix loop bails at its next checkpoint
+ *  - its containers have been force-removed, so in-flight execs fail fast
+ */
+const cancelledJobs = new Set<string>();
+
+export function isJobCancelled(jobId: string): boolean {
+  return cancelledJobs.has(jobId);
+}
+
+/**
+ * Cancel a running job: mark it 'cancelled' and force-kill its containers so
+ * any in-flight clone/install/run unblocks right away instead of running to
+ * its (possibly multi-minute) timeout.
+ */
+export async function cancelJob(jobId: string): Promise<void> {
+  cancelledJobs.add(jobId);
+  updateJob(jobId, { status: 'cancelled', error: 'Cancelled by user.' });
+  logEvent(jobId, 'job_cancelled', {});
+  await Promise.allSettled([
+    forceRemoveContainerByName(`reporevive-detect-${jobId}`),
+    forceRemoveContainerByName(`reporevive-job-${jobId}`),
+  ]);
+}
+
+/** Status writes from the pipeline no-op once a job is cancelled. */
+function setStatus(jobId: string, patch: Parameters<typeof updateJob>[1]): void {
+  if (cancelledJobs.has(jobId)) return;
+  updateJob(jobId, patch);
+}
 
 export function jobWorkdir(jobId: string): string {
   return `/workspace/job-${jobId}`;
@@ -31,12 +71,61 @@ function shellQuote(command: string): string {
 }
 
 function fail(jobId: string, error: string): void {
+  if (cancelledJobs.has(jobId)) return;
   updateJob(jobId, { status: 'failed', error });
   logEvent(jobId, 'job_failed', { error });
 }
 
 function combinedLog(result: ExecResult): string {
   return tail([result.stderr, result.stdout].filter(Boolean).join('\n'));
+}
+
+/**
+ * A dev server binds a port and runs forever, so we normally treat "still
+ * alive when the timeout fired" (exit 124) as success. But some servers exit
+ * non-zero *right after* printing a readiness banner — most notably Flask in
+ * debug mode, whose auto-reloader spawns a second process that collides on the
+ * port ("Address already in use"). In those cases the app genuinely started,
+ * so a readiness banner in the output counts as success too.
+ */
+const SERVER_READY_PATTERNS: RegExp[] = [
+  /Running on https?:\/\//i, // Flask / Werkzeug
+  /Serving Flask app/i, // Flask banner
+  /Uvicorn running on/i, // FastAPI / Uvicorn
+  /Application startup complete/i, // Starlette / Uvicorn lifespan
+  /Now listening on/i,
+  /listening (?:on|at)\b/i, // Express and most Node servers
+  /server (?:is )?(?:running|started|listening|ready)/i,
+  /Local:\s+https?:\/\//i, // Vite / CRA dev servers
+];
+
+function serverLooksStarted(run: ExecResult): boolean {
+  const out = `${run.stdout}\n${run.stderr}`;
+  return SERVER_READY_PATTERNS.some((re) => re.test(out));
+}
+
+/**
+ * Whether a start-command run counts as the app successfully running:
+ *  - exit 0:   finished cleanly (a script)
+ *  - exit 124: still alive when `timeout` fired (a long-running server)
+ *  - other exit + readiness banner: the server started, then a runtime
+ *    artifact (e.g. Flask's debug reloader fighting for the port) forced a
+ *    non-zero exit — still a success from our perspective.
+ */
+function runIsSuccess(run: ExecResult): boolean {
+  if (run.exitCode === 0 || run.exitCode === 124) return true;
+  return serverLooksStarted(run);
+}
+
+/**
+ * Env prepended to the start command. For Python we neutralize Flask/Werkzeug's
+ * debug auto-reloader: WERKZEUG_RUN_MAIN=true makes Werkzeug act as the
+ * already-reloaded child (it binds and serves without spawning a second watcher
+ * process), which avoids the "Address already in use" port collision;
+ * FLASK_DEBUG=0 is a belt-and-braces fallback. Harmless for non-Flask apps.
+ */
+function runEnvPrefix(stack: StackInfo): string {
+  return stack.language === 'python' ? 'WERKZEUG_RUN_MAIN=true FLASK_DEBUG=0 PYTHONUNBUFFERED=1 ' : '';
 }
 
 /* ==========================================================================
@@ -283,6 +372,12 @@ async function readManifestContent(stack: StackInfo, tools: ToolExecutors): Prom
 export interface AttemptFixResult {
   succeeded: boolean;
   unfixable: boolean;
+  /**
+   * The most recent error observed across the fix loop's re-tests. The final
+   * report uses this so it reflects the *actual* last failure (e.g. a new error
+   * introduced/uncovered by a fix) rather than the original pre-fix error.
+   */
+  lastError?: string | null;
 }
 
 /**
@@ -309,7 +404,8 @@ export async function attemptFix(
   let priorReflection: Reflection | null = null;
 
   for (let attemptNumber = 1; attemptNumber <= config.ai.maxFixAttempts; attemptNumber++) {
-    updateJob(jobId, { status: 'fixing' });
+    if (cancelledJobs.has(jobId)) return { succeeded: false, unfixable: false, lastError: currentError };
+    setStatus(jobId, { status: 'fixing' });
 
     const manifestContent = await readManifestContent(stack, tools);
     const diagnosis = await diagnoseFailure(jobId, container.id, currentError, manifestContent);
@@ -320,7 +416,7 @@ export async function attemptFix(
     const fixResult = await runFixAttempt(jobId, attemptNumber, currentError, diagnosis, tools, priorReflection);
 
     // ---- re-test: reinstall, then rerun (unless install itself failed) ----
-    updateJob(jobId, { status: 'installing' });
+    setStatus(jobId, { status: 'installing' });
     logEvent(jobId, 'install_started', { attemptNumber, command: stack.installCommand, phase: 'retest' });
     const install = await execInContainer(container, ['sh', '-c', stack.installCommand], {
       workdir,
@@ -338,17 +434,22 @@ export async function attemptFix(
       logEvent(jobId, 'install_failed', { attemptNumber, phase: 'retest', error: outcomeError });
     } else {
       logEvent(jobId, 'install_succeeded', { attemptNumber, phase: 'retest', command: stack.installCommand });
-      updateJob(jobId, { status: 'running' });
+      setStatus(jobId, { status: 'running' });
       retestCommand = stack.startCommand!;
       logEvent(jobId, 'run_started', { attemptNumber, command: stack.startCommand, phase: 'retest' });
       const run = await execInContainer(
         container,
-        ['sh', '-c', `timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand!)}`],
+        ['sh', '-c', `${runEnvPrefix(stack)}timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand!)}`],
         { workdir, timeoutMs: (config.runTimeoutSec + 30) * 1000 }
       );
-      if (run.exitCode === 0 || run.exitCode === 124) {
+      if (runIsSuccess(run)) {
         succeeded = true;
-        logEvent(jobId, 'run_succeeded', { attemptNumber, phase: 'retest', exitCode: run.exitCode });
+        logEvent(jobId, 'run_succeeded', {
+          attemptNumber,
+          phase: 'retest',
+          exitCode: run.exitCode,
+          viaReadinessBanner: run.exitCode !== 0 && run.exitCode !== 124,
+        });
       } else {
         outcomeError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
         logEvent(jobId, 'run_failed', { attemptNumber, phase: 'retest', exitCode: run.exitCode, error: outcomeError });
@@ -395,14 +496,14 @@ export async function attemptFix(
     // Reflection can short-circuit the loop when the failure looks unfixable
     // within this approach — no point burning the remaining attempts.
     if (!reflection.shouldRetry) {
-      return { succeeded: false, unfixable: true };
+      return { succeeded: false, unfixable: true, lastError: outcomeError ?? currentError };
     }
 
     currentError = outcomeError ?? currentError;
     priorReflection = reflection;
   }
 
-  return { succeeded: false, unfixable: false };
+  return { succeeded: false, unfixable: false, lastError: currentError };
 }
 
 /**
@@ -420,7 +521,7 @@ export async function processJob(jobId: string): Promise<void> {
   const workdir = jobWorkdir(jobId);
 
   // ---- Phase 1: clone + detect in a throwaway alpine/git container ----
-  updateJob(jobId, { status: 'cloning' });
+  setStatus(jobId, { status: 'cloning' });
   let stack: StackInfo | undefined;
   {
     const detectContainer = await createJobContainer({
@@ -439,7 +540,7 @@ export async function processJob(jobId: string): Promise<void> {
         return;
       }
 
-      updateJob(jobId, { status: 'detecting' });
+      setStatus(jobId, { status: 'detecting' });
       const scopedExec: ScopedExec = (cmd) => execInContainer(detectContainer, cmd, { workdir, timeoutMs: 30_000 });
 
       // Catch broken/conflicting input data before install or the fix loop —
@@ -451,7 +552,7 @@ export async function processJob(jobId: string): Promise<void> {
           conflicting_manifests: 'manifest_conflict',
           engine_version_mismatch: 'engine_mismatch',
         } as const;
-        updateJob(jobId, { status: validation.kind, error: validation.message });
+        setStatus(jobId, { status: validation.kind, error: validation.message });
         logEvent(jobId, eventByKind[validation.kind], { status: validation.kind, message: validation.message });
         return;
       }
@@ -461,12 +562,12 @@ export async function processJob(jobId: string): Promise<void> {
       if (detected.kind === 'not_found') {
         const message =
           'No package.json, requirements.txt, or pyproject.toml found in the repo root. Only Node and Python projects are supported in this MVP.';
-        updateJob(jobId, { status: 'unsupported_stack', error: message });
+        setStatus(jobId, { status: 'unsupported_stack', error: message });
         logEvent(jobId, 'stack_detection_failed', { reason: 'not_found', message });
         return;
       }
       if (detected.kind === 'unsupported_variant') {
-        updateJob(jobId, { status: 'unsupported_stack', error: detected.reason });
+        setStatus(jobId, { status: 'unsupported_stack', error: detected.reason });
         logEvent(jobId, 'stack_detection_failed', { reason: 'unsupported_variant', message: detected.reason });
         return;
       }
@@ -482,7 +583,7 @@ export async function processJob(jobId: string): Promise<void> {
     }
   }
 
-  updateJob(jobId, { stack });
+  setStatus(jobId, { stack });
 
   if (!stack.startCommand) {
     fail(
@@ -509,7 +610,7 @@ export async function processJob(jobId: string): Promise<void> {
       return;
     }
 
-    updateJob(jobId, { status: 'installing' });
+    setStatus(jobId, { status: 'installing' });
     logEvent(jobId, 'install_started', { command: stack.installCommand, phase: 'initial' });
     const install = await execInContainer(container, ['sh', '-c', stack.installCommand], {
       workdir,
@@ -527,7 +628,7 @@ export async function processJob(jobId: string): Promise<void> {
       fixResult = await attemptFix(jobId, container, workdir, stack, lastError);
     } else {
       logEvent(jobId, 'install_succeeded', { phase: 'initial', command: stack.installCommand });
-      updateJob(jobId, { status: 'running' });
+      setStatus(jobId, { status: 'running' });
       logEvent(jobId, 'run_started', { command: stack.startCommand, phase: 'initial' });
       // `timeout <n>` inside the container: exit 124 means the process was
       // still alive when the timer fired (a server that stayed up = success);
@@ -535,12 +636,16 @@ export async function processJob(jobId: string): Promise<void> {
       // anything else is a crash.
       const run = await execInContainer(
         container,
-        ['sh', '-c', `timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand)}`],
+        ['sh', '-c', `${runEnvPrefix(stack)}timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand)}`],
         { workdir, timeoutMs: (config.runTimeoutSec + 30) * 1000 }
       );
-      if (run.exitCode === 0 || run.exitCode === 124) {
+      if (runIsSuccess(run)) {
         fixResult = { succeeded: true, unfixable: false };
-        logEvent(jobId, 'run_succeeded', { phase: 'initial', exitCode: run.exitCode });
+        logEvent(jobId, 'run_succeeded', {
+          phase: 'initial',
+          exitCode: run.exitCode,
+          viaReadinessBanner: run.exitCode !== 0 && run.exitCode !== 124,
+        });
       } else {
         lastError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
         logEvent(jobId, 'run_failed', { phase: 'initial', exitCode: run.exitCode, error: lastError });
@@ -549,12 +654,15 @@ export async function processJob(jobId: string): Promise<void> {
     }
 
     if (!fixResult.succeeded) {
+      // Prefer the fix loop's last re-test error so the report reflects the real
+      // final failure, not the original pre-fix error.
+      const finalError = fixResult.lastError ?? lastError;
       if (fixResult.unfixable) {
-        const error = lastError ?? 'The failure was judged unfixable within the current approach.';
-        updateJob(jobId, { status: 'failed_unfixable', error });
+        const error = finalError ?? 'The failure was judged unfixable within the current approach.';
+        setStatus(jobId, { status: 'failed_unfixable', error });
         logEvent(jobId, 'job_failed_unfixable', { error });
       } else {
-        fail(jobId, lastError ?? 'Unknown failure.');
+        fail(jobId, finalError ?? 'Unknown failure.');
       }
       return;
     }
@@ -575,7 +683,7 @@ export async function processJob(jobId: string): Promise<void> {
     const zipPath = path.join(resultsDir, `${jobId}.zip`);
     fs.writeFileSync(zipPath, zipBuffer);
 
-    updateJob(jobId, { status: 'succeeded', error: null, resultZipPath: zipPath });
+    setStatus(jobId, { status: 'succeeded', error: null, resultZipPath: zipPath });
     logEvent(jobId, 'job_succeeded', {
       resultZip: path.basename(zipPath),
       attempts: getJob(jobId)?.attempts.length ?? 0,

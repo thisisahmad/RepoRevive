@@ -8,6 +8,7 @@ export const STATUS_META = {
   succeeded: { label: 'Succeeded', color: 'text-accent', dot: 'bg-accent' },
   failed: { label: 'Failed', color: 'text-error', dot: 'bg-error' },
   failed_unfixable: { label: 'Unfixable', color: 'text-error', dot: 'bg-error' },
+  cancelled: { label: 'Cancelled', color: 'text-muted', dot: 'bg-muted-dark' },
   unsupported_stack: { label: 'Unsupported', color: 'text-yellow-500', dot: 'bg-yellow-500' },
   invalid_manifest: { label: 'Invalid manifest', color: 'text-yellow-500', dot: 'bg-yellow-500' },
   conflicting_manifests: { label: 'Conflicting manifests', color: 'text-yellow-500', dot: 'bg-yellow-500' },

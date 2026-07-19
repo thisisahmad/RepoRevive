@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Link } from 'react-router-dom'
-import { createJob, downloadJobZip, isTerminalStatus } from '../lib/api'
+import { cancelJob, createJob, downloadJobZip, isTerminalStatus } from '../lib/api'
 import { takePendingRepoUrl } from '../lib/pendingRepo'
 import { useJobPolling } from '../hooks/useJobPolling'
 import { useJobLogs } from '../hooks/useJobLogs'
@@ -200,6 +200,24 @@ function ResultPanel({ job }) {
     )
   }
 
+  if (job.status === 'cancelled') {
+    return (
+      <div className="space-y-3 p-6">
+        <div className="flex items-center gap-2 text-muted">
+          <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none">
+            <rect x="4" y="4" width="8" height="8" rx="1" stroke="currentColor" strokeWidth="1.6" />
+          </svg>
+          <span className="font-mono text-sm font-medium">Cancelled</span>
+        </div>
+        <p className="font-mono text-xs leading-relaxed text-muted sm:text-sm">
+          You stopped this job before it finished — its sandbox container has been destroyed. Retry to run it again from
+          scratch.
+        </p>
+        {job.attempts?.length > 0 && <ViewReportLink jobId={job.id} />}
+      </div>
+    )
+  }
+
   const unfixable = job.status === 'failed_unfixable'
 
   return (
@@ -229,22 +247,26 @@ function ResultPanel({ job }) {
 /** The interactive "paste a repo, watch it run" widget — lives on the dashboard. */
 export default function ReviveWidget() {
   const [repoUrl, setRepoUrl] = useState('')
+  const [submittedUrl, setSubmittedUrl] = useState('')
   const [jobId, setJobId] = useState(null)
   const [submitError, setSubmitError] = useState(null)
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
   const [startedAt, setStartedAt] = useState(null)
   const [elapsedMs, setElapsedMs] = useState(0)
 
-  const { job, error: pollError } = useJobPolling(jobId)
+  const { job, error: pollError, refresh: refreshJob } = useJobPolling(jobId)
   const jobDone = Boolean(job && isTerminalStatus(job.status))
-  const activityEvents = useJobLogs(jobId, jobDone)
+  const { events: activityEvents, refresh: refreshLogs } = useJobLogs(jobId, jobDone)
 
   const submit = async (url) => {
     if (!url.trim() || isSubmitting) return
     setSubmitError(null)
     setIsSubmitting(true)
+    setIsCancelling(false)
     try {
       const created = await createJob(url.trim())
+      setSubmittedUrl(url.trim())
       setJobId(created.id)
       setStartedAt(Date.now())
       setElapsedMs(0)
@@ -288,6 +310,30 @@ export default function ReviveWidget() {
     setJobId(null)
     setSubmitError(null)
     setRepoUrl('')
+    setSubmittedUrl('')
+    setIsCancelling(false)
+  }
+
+  const handleCancel = async () => {
+    if (!jobId || isCancelling) return
+    setIsCancelling(true)
+    try {
+      await cancelJob(jobId)
+      await refreshJob()
+    } catch (err) {
+      setSubmitError(friendlyError(err.message))
+      setIsCancelling(false)
+    }
+  }
+
+  const handleRefresh = () => {
+    refreshJob()
+    refreshLogs()
+  }
+
+  const handleRetry = () => {
+    const url = submittedUrl || repoUrl
+    if (url) submit(url)
   }
 
   const isRunning = jobId && (!job || !isTerminalStatus(job.status))
@@ -321,19 +367,70 @@ export default function ReviveWidget() {
         )}
       </AnimatePresence>
 
-      {jobId && <AiActivityLog events={activityEvents} running={isRunning} />}
+      {jobId && <AiActivityLog events={activityEvents} running={isRunning} currentStatus={job?.status} />}
 
       {isLongRunning && (
         <p className="border-t border-border-subtle px-6 py-3 font-mono text-xs text-muted-dark">
-          Larger repos can take a few minutes to install — hang tight.
+          Larger repos can take a few minutes to install — hang tight, or cancel and retry.
         </p>
       )}
 
+      {isRunning && (
+        <div className="flex flex-wrap items-center gap-3 border-t border-border-subtle px-6 py-4">
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={isCancelling}
+            className="inline-flex items-center gap-2 rounded-lg border border-error/40 px-4 py-2 font-mono text-xs text-error transition-colors hover:bg-error/10 disabled:opacity-50"
+          >
+            {isCancelling && (
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-error/40 border-t-error" />
+            )}
+            {isCancelling ? 'Cancelling…' : 'Cancel job'}
+          </button>
+          <button
+            type="button"
+            onClick={handleRefresh}
+            className="inline-flex items-center gap-2 rounded-lg border border-border-subtle px-4 py-2 font-mono text-xs text-muted transition-colors hover:border-accent/40 hover:text-accent"
+          >
+            <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none">
+              <path
+                d="M13 8a5 5 0 1 1-1.46-3.54M13 3v2.5h-2.5"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
+            Refresh
+          </button>
+        </div>
+      )}
+
       {job && isTerminalStatus(job.status) && (
-        <div className="border-t border-border-subtle px-6 py-4">
+        <div className="flex flex-wrap items-center gap-4 border-t border-border-subtle px-6 py-4">
           <button type="button" onClick={handleReset} className="font-mono text-xs text-accent hover:underline">
             ← Try another repo
           </button>
+          {(submittedUrl || repoUrl) && (
+            <button
+              type="button"
+              onClick={handleRetry}
+              disabled={isSubmitting}
+              className="inline-flex items-center gap-2 rounded-lg border border-border-subtle px-4 py-2 font-mono text-xs text-foreground transition-colors hover:border-accent/40 hover:text-accent disabled:opacity-50"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none">
+                <path
+                  d="M13 8a5 5 0 1 1-1.46-3.54M13 3v2.5h-2.5"
+                  stroke="currentColor"
+                  strokeWidth="1.5"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+              {isSubmitting ? 'Retrying…' : 'Retry this repo'}
+            </button>
+          )}
         </div>
       )}
     </TerminalShell>

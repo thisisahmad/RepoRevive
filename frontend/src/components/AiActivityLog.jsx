@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 function fmtTime(iso) {
   try {
@@ -76,7 +76,8 @@ function describe(ev) {
       const text = files.length
         ? `AI edited ${files.length} file${files.length > 1 ? 's' : ''}: ${files.join(', ')}`
         : `AI attempt ${d.attemptNumber} made no file changes`
-      return { tone: 'ai', ai: true, text }
+      const detail = d.outcome ? firstLine(d.outcome, 220) : null
+      return { tone: 'ai', ai: true, text, detail }
     }
     case 'reflection_completed': {
       const bits = []
@@ -112,19 +113,38 @@ const TONE_DOT = {
   ai: 'bg-sky-400',
 }
 
+const STATUS_HINT = {
+  queued: 'waiting in the queue',
+  cloning: 'cloning the repository',
+  detecting: 'detecting the stack',
+  installing: 'installing dependencies (can take a few minutes)',
+  running: 'starting the app',
+  fixing: 'the AI is working on a fix',
+}
+
 /**
  * Live, human-readable trace of what the pipeline and the AI are doing,
- * built from the job's structured log events. Auto-scrolls as new lines land.
+ * built from the job's structured log events. Auto-scrolls as new lines land,
+ * and shows a "working…" heartbeat so long steps never look frozen.
  */
-export default function AiActivityLog({ events, running }) {
+export default function AiActivityLog({ events, running, currentStatus }) {
   const scrollRef = useRef(null)
+  const [now, setNow] = useState(Date.now())
 
   const lines = (events || [])
     .map((ev) => {
       const d = describe(ev)
-      return d ? { ...d, key: `${ev.timestamp}-${ev.eventType}`, time: fmtTime(ev.timestamp) } : null
+      return d ? { ...d, key: `${ev.timestamp}-${ev.eventType}`, time: fmtTime(ev.timestamp), ts: ev.timestamp } : null
     })
     .filter(Boolean)
+
+  // Tick once a second while running so the "seconds since last update" counter
+  // keeps moving even when no new events are arriving (e.g. a long install).
+  useEffect(() => {
+    if (!running) return
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [running])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -132,6 +152,10 @@ export default function AiActivityLog({ events, running }) {
   }, [lines.length])
 
   if (lines.length === 0) return null
+
+  const lastTs = lines[lines.length - 1]?.ts
+  const secondsSince = lastTs ? Math.max(0, Math.round((now - new Date(lastTs).getTime()) / 1000)) : 0
+  const hint = STATUS_HINT[currentStatus] || 'working'
 
   return (
     <div className="border-t border-border-subtle">
@@ -160,9 +184,21 @@ export default function AiActivityLog({ events, running }) {
                 </span>
               )}
               {line.text}
+              {line.detail && <span className="mt-0.5 block text-[11px] text-muted-dark">{line.detail}</span>}
             </span>
           </div>
         ))}
+
+        {running && (
+          <div className="flex items-center gap-2.5 pt-1 font-mono text-xs text-muted-dark">
+            <span className="w-[38px] shrink-0" />
+            <span className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-muted-dark/40 border-t-sky-400" />
+            <span>
+              Working — {hint}
+              {secondsSince > 3 && <span className="text-muted-dark/70"> · {secondsSince}s since last update</span>}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   )

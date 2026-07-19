@@ -3,11 +3,23 @@ import { Router } from 'express';
 import { requireAuth } from '../auth/middleware';
 import { buildReport } from '../report/build';
 import { renderReportMarkdown } from '../report/markdown';
-import { Job } from '../types';
+import { cancelJob } from '../sandbox/pipeline';
+import { Job, JobStatus } from '../types';
 import { logEvent, readJobLog } from '../utils/logger';
 import { enqueueJob } from './runner';
 import { createJob, getJob, listJobsByUser } from './store';
 import { validateGithubUrl } from './validate';
+
+const TERMINAL_STATUSES: ReadonlySet<JobStatus> = new Set<JobStatus>([
+  'succeeded',
+  'failed',
+  'failed_unfixable',
+  'cancelled',
+  'unsupported_stack',
+  'invalid_manifest',
+  'conflicting_manifests',
+  'engine_version_mismatch',
+]);
 
 const router = Router();
 router.use(requireAuth);
@@ -49,6 +61,20 @@ router.get('/:id', (req, res) => {
     return res.status(404).json({ error: 'job not found' });
   }
   return res.json(toPublicJob(job));
+});
+
+// POST /api/jobs/:id/cancel -> stop a running job (owner only)
+router.post('/:id/cancel', async (req, res) => {
+  const job = getJob(req.params.id);
+  if (!job || job.userId !== req.userId) {
+    return res.status(404).json({ error: 'job not found' });
+  }
+  if (TERMINAL_STATUSES.has(job.status)) {
+    return res.status(409).json({ error: `job already finished (${job.status})` });
+  }
+  await cancelJob(job.id);
+  const updated = getJob(job.id);
+  return res.json(updated ? toPublicJob(updated) : { id: job.id, status: 'cancelled' });
 });
 
 // GET /api/jobs/:id/download -> streams the result zip (owner only)

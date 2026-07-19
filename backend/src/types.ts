@@ -10,6 +10,7 @@ export type JobStatus =
   | 'succeeded'
   | 'failed'
   | 'failed_unfixable' // reflection stopped the loop early: not fixable within this approach
+  | 'cancelled' // user cancelled the job mid-run
   | 'unsupported_stack'
   // Structural input problems caught before install/fix loop ever runs:
   | 'invalid_manifest' // package.json/pyproject.toml exists but doesn't parse

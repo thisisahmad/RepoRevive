@@ -4,6 +4,7 @@ const TERMINAL_STATUSES = new Set([
   'succeeded',
   'failed',
   'failed_unfixable',
+  'cancelled',
   'unsupported_stack',
   'invalid_manifest',
   'conflicting_manifests',
@@ -69,6 +70,29 @@ export function getJob(id) {
 /** Structured per-job event trace: { jobId, events: [{ timestamp, eventType, data }] }. */
 export function getJobLogs(id) {
   return request(`/api/jobs/${id}/logs`, { auth: true })
+}
+
+/** Ask the backend to stop a running job (kills its container). */
+export function cancelJob(id) {
+  return request(`/api/jobs/${id}/cancel`, { method: 'POST', auth: true })
+}
+
+/** Structured report: { status, repoUrl, stack, attempts, finalOutcome, error }. */
+export function getJobReport(id) {
+  return request(`/api/jobs/${id}/report`, { auth: true })
+}
+
+/** Downloads the report as a Markdown file (binary-ish, so bypasses request()). */
+export async function downloadReportMarkdown(id) {
+  const res = await fetch(`${API_URL}/api/jobs/${id}/report.md`, {
+    headers: authToken ? { Authorization: `Bearer ${authToken}` } : {},
+  })
+  if (!res.ok) {
+    if (res.status === 401) onUnauthorized?.()
+    const data = await readJson(res)
+    throw new Error(data?.error || `Download failed (${res.status})`)
+  }
+  return res.blob()
 }
 
 export function listJobs() {

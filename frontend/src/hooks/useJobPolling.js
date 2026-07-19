@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getJob, isTerminalStatus } from '../lib/api'
 
 const POLL_INTERVAL_MS = 1500
@@ -8,6 +8,16 @@ export function useJobPolling(jobId) {
   const [job, setJob] = useState(null)
   const [error, setError] = useState(null)
   const timerRef = useRef(null)
+
+  const refresh = useCallback(async () => {
+    if (!jobId) return
+    try {
+      const data = await getJob(jobId)
+      setJob(data)
+    } catch (err) {
+      setError(err.message)
+    }
+  }, [jobId])
 
   useEffect(() => {
     if (!jobId) {
@@ -40,5 +50,5 @@ export function useJobPolling(jobId) {
     }
   }, [jobId])
 
-  return { job, error }
+  return { job, error, refresh }
 }

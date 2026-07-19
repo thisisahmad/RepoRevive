@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { getJobLogs } from '../lib/api'
 
 const POLL_INTERVAL_MS = 1500
@@ -12,6 +12,16 @@ const POLL_INTERVAL_MS = 1500
 export function useJobLogs(jobId, isDone) {
   const [events, setEvents] = useState([])
   const timerRef = useRef(null)
+
+  const refresh = useCallback(async () => {
+    if (!jobId) return
+    try {
+      const data = await getJobLogs(jobId)
+      setEvents(data?.events ?? [])
+    } catch {
+      // ignore — the periodic poll will catch up
+    }
+  }, [jobId])
 
   useEffect(() => {
     if (!jobId) {
@@ -42,5 +52,5 @@ export function useJobLogs(jobId, isDone) {
     }
   }, [jobId, isDone])
 
-  return events
+  return { events, refresh }
 }

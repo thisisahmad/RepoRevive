@@ -173,3 +173,16 @@ export async function destroyContainer(container: Docker.Container): Promise<voi
     console.warn('failed to remove container:', err instanceof Error ? err.message : err);
   }
 }
+
+/**
+ * Force-remove a container by its name (containers are named `<prefix>-<jobId>`).
+ * Used to cancel a running job: killing the container makes any in-flight
+ * `docker exec` (clone/install/run) unblock immediately. No-ops if it's gone.
+ */
+export async function forceRemoveContainerByName(name: string): Promise<void> {
+  try {
+    await docker.getContainer(name).remove({ force: true });
+  } catch {
+    // not found / already removed — nothing to do
+  }
+}

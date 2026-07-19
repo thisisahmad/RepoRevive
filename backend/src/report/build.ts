@@ -34,6 +34,10 @@ function describeOutcome(status: JobStatus, attemptCount: number): string {
         : 'The repo failed to install or run.';
     case 'failed_unfixable':
       return `The fix loop stopped early after ${attemptCount} ${plural}: reflection concluded the failure isn't fixable within the current approach (for example a missing paid API key or an environment-specific issue), so the remaining attempts were skipped.`;
+    case 'cancelled':
+      return attemptCount > 0
+        ? `The job was cancelled by the user after ${attemptCount} ${plural}.`
+        : 'The job was cancelled by the user before it finished.';
     case 'unsupported_stack':
       return "This repo's stack isn't supported by this MVP.";
     case 'invalid_manifest':

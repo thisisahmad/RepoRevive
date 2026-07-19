@@ -27,6 +27,7 @@ function pump(): void {
           'succeeded',
           'failed',
           'failed_unfixable',
+          'cancelled',
           'unsupported_stack',
           'invalid_manifest',
           'conflicting_manifests',
