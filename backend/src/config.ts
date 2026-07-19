@@ -20,7 +20,9 @@ export const config = {
   },
 
   ai: {
-    model: 'gpt-4o-mini',
+    // Override without code changes via OPENAI_MODEL in backend/.env
+    // (e.g. gpt-5.6 for stronger fixes). Used for diagnose, fix loop, reflect.
+    model: process.env.OPENAI_MODEL ?? 'gpt-4o-mini',
     maxFixAttempts: 5,
     maxToolRoundsPerAttempt: 8,
     // Below this diagnosis confidence we still run the fix loop, but flag the

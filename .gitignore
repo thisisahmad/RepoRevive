@@ -26,3 +26,6 @@ Thumbs.db
 
 # Cursor assets (local screenshots)
 assets/
+
+# Local-only developer helper (not shipped)
+backend/scripts/model-probe.ts
