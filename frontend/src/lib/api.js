@@ -66,6 +66,11 @@ export function getJob(id) {
   return request(`/api/jobs/${id}`, { auth: true })
 }
 
+/** Structured per-job event trace: { jobId, events: [{ timestamp, eventType, data }] }. */
+export function getJobLogs(id) {
+  return request(`/api/jobs/${id}/logs`, { auth: true })
+}
+
 export function listJobs() {
   return request('/api/jobs', { auth: true })
 }

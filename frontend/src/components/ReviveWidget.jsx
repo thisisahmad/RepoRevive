@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom'
 import { createJob, downloadJobZip, isTerminalStatus } from '../lib/api'
 import { takePendingRepoUrl } from '../lib/pendingRepo'
 import { useJobPolling } from '../hooks/useJobPolling'
+import { useJobLogs } from '../hooks/useJobLogs'
+import AiActivityLog from './AiActivityLog'
 import RepoUrlForm from './RepoUrlForm'
 import TerminalShell from './ui/TerminalShell'
 
@@ -234,6 +236,8 @@ export default function ReviveWidget() {
   const [elapsedMs, setElapsedMs] = useState(0)
 
   const { job, error: pollError } = useJobPolling(jobId)
+  const jobDone = Boolean(job && isTerminalStatus(job.status))
+  const activityEvents = useJobLogs(jobId, jobDone)
 
   const submit = async (url) => {
     if (!url.trim() || isSubmitting) return
@@ -316,6 +320,8 @@ export default function ReviveWidget() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {jobId && <AiActivityLog events={activityEvents} running={isRunning} />}
 
       {isLongRunning && (
         <p className="border-t border-border-subtle px-6 py-3 font-mono text-xs text-muted-dark">
