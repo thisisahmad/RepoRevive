@@ -1,0 +1,53 @@
+{
+  "_comment": "Fixed set of known public repos run through the RepoRevive pipeline by run.ts. expectedStack/expectedOutcome are documented HYPOTHESES about how the system SHOULD classify each repo; the whole point of the eval is to measure actual vs expected, so a mismatch here is a finding, not a bug in the fixtures. expectedOutcome: 'fixable' (ends up running -> status succeeded), 'unfixable' (reflection should give up early -> status failed_unfixable), 'unsupported' (rejected before install -> status unsupported_stack), 'invalid_manifest' (Part B structural rejection -> status invalid_manifest). expectedStack 'none' means no supported (Node/Python) stack is expected.",
+  "fixtures": [
+    {
+      "repoUrl": "https://github.com/heroku/node-js-sample",
+      "expectedStack": "node",
+      "expectedOutcome": "fixable",
+      "notes": "Minimal Express app; expected to install and run cleanly on the first try (this is the project's own smoke-test repo). Baseline for the happy path."
+    },
+    {
+      "repoUrl": "https://github.com/heroku/node-js-getting-started",
+      "expectedStack": "node",
+      "expectedOutcome": "fixable",
+      "notes": "Slightly larger Express getting-started app with a scripts.start; expected to install and stay alive under the run timeout (counts as running)."
+    },
+    {
+      "repoUrl": "https://github.com/Azure-Samples/python-docs-hello-world",
+      "expectedStack": "python",
+      "expectedOutcome": "fixable",
+      "notes": "Tiny Flask sample with app.py + requirements.txt. `python app.py` imports Flask and exits cleanly (exit 0 = success in the pipeline), so it should count as fixable/runnable."
+    },
+    {
+      "repoUrl": "https://github.com/gothinkster/node-express-realworld-example-app",
+      "expectedStack": "node",
+      "expectedOutcome": "unfixable",
+      "notes": "RealWorld API server that connects to a database/URI at boot which won't exist in the sandbox. No code-only fix can conjure a database, so reflection should conclude it's unfixable and stop early (failed_unfixable) rather than burn all 5 attempts."
+    },
+    {
+      "repoUrl": "https://github.com/openai/openai-quickstart-node",
+      "expectedStack": "node",
+      "expectedOutcome": "unfixable",
+      "notes": "Requires an OPENAI_API_KEY that will never be present. Included to check that reflection recognizes a secret/paid-dependency failure as unfixable instead of looping. (If the dev server boots and stays alive without hitting the API, this may instead read as fixable - exactly the kind of thing the eval surfaces.)"
+    },
+    {
+      "repoUrl": "https://github.com/vitejs/vite",
+      "expectedStack": "node",
+      "expectedOutcome": "unsupported",
+      "notes": "A pnpm/workspaces monorepo. Detection should reject it as an unsupported_variant -> unsupported_stack with a specific reason, not attempt an install (from the project's quick-test list)."
+    },
+    {
+      "repoUrl": "https://github.com/golang/example",
+      "expectedStack": "none",
+      "expectedOutcome": "unsupported",
+      "notes": "A Go repo with no package.json/requirements.txt/pyproject.toml. Should be classified 'not_found' -> unsupported_stack, exercising the unsupported-language path."
+    },
+    {
+      "repoUrl": "https://github.com/Marak/badproject",
+      "expectedStack": "node",
+      "expectedOutcome": "invalid_manifest",
+      "notes": "A repo that exists specifically because its package.json is intentionally malformed (not valid JSON). Exercises the Part B pre-flight validation: should stop with status invalid_manifest BEFORE install and before the AI fix loop is ever given the broken input."
+    }
+  ]
+}
