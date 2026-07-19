@@ -13,9 +13,15 @@ export default function DashboardStats({ jobs }) {
   const total = jobs.length
   const running = jobs.filter((j) => !isTerminalStatus(j.status)).length
   const succeeded = jobs.filter((j) => j.status === 'succeeded').length
-  const failed = jobs.filter(
-    (j) => j.status === 'failed' || j.status === 'failed_unfixable' || j.status === 'unsupported_stack'
-  ).length
+  const FAILED_STATUSES = new Set([
+    'failed',
+    'failed_unfixable',
+    'unsupported_stack',
+    'invalid_manifest',
+    'conflicting_manifests',
+    'engine_version_mismatch',
+  ])
+  const failed = jobs.filter((j) => FAILED_STATUSES.has(j.status)).length
 
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">

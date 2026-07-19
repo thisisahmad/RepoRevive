@@ -23,7 +23,16 @@ function pump(): void {
         console.error(`[job ${jobId}] pipeline crashed:`, err);
         const job = getJob(jobId);
         // Don't clobber a terminal status the pipeline already set.
-        if (job && !['succeeded', 'failed', 'failed_unfixable', 'unsupported_stack'].includes(job.status)) {
+        const terminal = [
+          'succeeded',
+          'failed',
+          'failed_unfixable',
+          'unsupported_stack',
+          'invalid_manifest',
+          'conflicting_manifests',
+          'engine_version_mismatch',
+        ];
+        if (job && !terminal.includes(job.status)) {
           updateJob(jobId, {
             status: 'failed',
             error: `Internal error: ${err instanceof Error ? err.message : String(err)}`,

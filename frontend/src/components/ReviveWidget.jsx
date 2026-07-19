@@ -175,13 +175,25 @@ function ResultPanel({ job }) {
     )
   }
 
-  if (job.status === 'unsupported_stack') {
+  const STRUCTURAL_LABELS = {
+    unsupported_stack: 'Unsupported stack',
+    invalid_manifest: 'Invalid manifest',
+    conflicting_manifests: 'Conflicting manifests',
+    engine_version_mismatch: 'Engine version mismatch',
+  }
+  if (STRUCTURAL_LABELS[job.status]) {
     return (
       <div className="space-y-3 p-6">
         <div className="flex items-center gap-2 text-yellow-500">
-          <span className="font-mono text-sm font-medium">Unsupported stack</span>
+          <span className="font-mono text-sm font-medium">{STRUCTURAL_LABELS[job.status]}</span>
         </div>
         <p className="font-mono text-xs leading-relaxed text-muted sm:text-sm">{job.error}</p>
+        {job.status !== 'unsupported_stack' && (
+          <p className="font-mono text-xs text-muted-dark">
+            This is a structural problem with the repo's setup, caught before install — the AI fix loop is
+            intentionally not run on it.
+          </p>
+        )}
       </div>
     )
   }

@@ -26,7 +26,20 @@ function fallbackClassification(): Omit<DiagnosisResult, 'suggestedUpgrade'> {
     explanation: 'The failure could not be automatically classified.',
     affectedPackage: null,
     suggestedFix: 'Inspect the error log and manifest file manually.',
+    confidence: 0,
+    assumptions: [],
   };
+}
+
+/** Clamp a model-provided confidence into [0,1]; missing/garbage -> fallback. */
+function parseConfidence(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : fallback;
+}
+
+/** Keep only non-empty strings; anything else (missing, non-array) -> []. */
+function parseAssumptions(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map((item) => item.trim());
 }
 
 async function classifyFailure(errorLog: string, manifestContent: string): Promise<Omit<DiagnosisResult, 'suggestedUpgrade'>> {
@@ -56,6 +69,10 @@ async function classifyFailure(errorLog: string, manifestContent: string): Promi
       explanation: typeof parsed.explanation === 'string' ? parsed.explanation : fallback.explanation,
       affectedPackage: typeof parsed.affectedPackage === 'string' ? parsed.affectedPackage : null,
       suggestedFix: typeof parsed.suggestedFix === 'string' ? parsed.suggestedFix : fallback.suggestedFix,
+      // New optional fields: don't fail the whole diagnosis if the model omits
+      // them — fall back to 0 confidence and no assumptions.
+      confidence: parseConfidence(parsed.confidence, fallback.confidence),
+      assumptions: parseAssumptions(parsed.assumptions),
     };
   } catch (err) {
     console.warn('diagnosis classification failed, falling back to "unknown":', err instanceof Error ? err.message : err);

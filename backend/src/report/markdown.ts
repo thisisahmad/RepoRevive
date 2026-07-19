@@ -15,6 +15,31 @@ function upgradeLine(u: SuggestedUpgrade): string {
 }
 
 /**
+ * Renders the diagnosis with its confidence and assumptions so a shaky guess
+ * reads as one — never as a certain call. Guards against pre-feature attempts
+ * that predate confidence/assumptions.
+ */
+function diagnosisLines(attempt: ReportData['attempts'][number]): string[] {
+  const { diagnosis } = attempt;
+  const categoryLabel = CATEGORY_LABELS[diagnosis.category] ?? diagnosis.category;
+  const affected = diagnosis.affectedPackage ? ` (${diagnosis.affectedPackage})` : '';
+  const confidence = typeof diagnosis.confidence === 'number' ? diagnosis.confidence : 0;
+
+  const lines: string[] = [];
+  const lowConfidence = attempt.lowConfidenceDiagnosis;
+  const flag = lowConfidence ? ' ⚠️ low confidence — treat as a tentative guess' : '';
+  lines.push(`**Diagnosis:** ${categoryLabel}${affected} (confidence: ${confidence.toFixed(2)})${flag}`);
+  lines.push(`**Explanation:** ${diagnosis.explanation}`);
+
+  const assumptions = diagnosis.assumptions ?? [];
+  if (assumptions.length > 0) {
+    lines.push('', '**Assumptions (not verified from the log):**');
+    for (const assumption of assumptions) lines.push(`- ${assumption}`);
+  }
+  return lines;
+}
+
+/**
  * Renders the reflection as a reasoning trace: why the attempt failed and
  * what the loop decided to do differently next — the "why", not just the diff.
  */
@@ -44,18 +69,27 @@ export function renderReportMarkdown(report: ReportData): string {
   lines.push(`**Status:** ${report.status}`);
   if (report.stack) {
     lines.push(`**Stack:** ${report.stack.language} (${report.stack.packageManager})`);
+    if (report.stack.noLockfile) {
+      lines.push('**Lockfile:** none found — dependencies were installed without a lockfile (one was generated at install time).');
+    }
   }
   lines.push('', report.finalOutcome);
+
+  // Structural input problems caught before install: no attempts to show, but
+  // the specific validation message (which package/version, etc.) matters.
+  if (
+    report.status === 'invalid_manifest' ||
+    report.status === 'conflicting_manifests' ||
+    report.status === 'engine_version_mismatch'
+  ) {
+    lines.push('', '## Input validation', '', '```', (report.error ?? 'No details captured.').trim(), '```');
+  }
 
   if (report.attempts.length > 0) {
     lines.push('', '## Fix attempts');
     for (const attempt of report.attempts) {
-      const categoryLabel = CATEGORY_LABELS[attempt.diagnosis.category] ?? attempt.diagnosis.category;
-      const affected = attempt.diagnosis.affectedPackage ? ` (${attempt.diagnosis.affectedPackage})` : '';
-
       lines.push('', `### Attempt ${attempt.attemptNumber}`, '');
-      lines.push(`**Diagnosis:** ${categoryLabel}${affected}`);
-      lines.push(`**Explanation:** ${attempt.diagnosis.explanation}`);
+      lines.push(...diagnosisLines(attempt));
       if (attempt.diagnosis.suggestedUpgrade) {
         lines.push(upgradeLine(attempt.diagnosis.suggestedUpgrade));
       }

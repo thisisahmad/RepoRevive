@@ -19,6 +19,14 @@ export interface DiagnosisResult {
   explanation: string;
   affectedPackage: string | null;
   suggestedFix: string;
+  /** How sure the model is about this diagnosis given the evidence, 0-1. */
+  confidence: number;
+  /**
+   * Things the model assumed but couldn't verify from the error log alone,
+   * e.g. "assumed a Node version mismatch from the error text, did not verify
+   * the installed Node version directly". Empty when nothing was assumed.
+   */
+  assumptions: string[];
   /** Only populated for deprecated_package / major_version_breaking_change. */
   suggestedUpgrade: SuggestedUpgrade | null;
 }
@@ -63,6 +71,12 @@ export interface ReflectionInput {
 export interface FixAttempt {
   attemptNumber: number;
   diagnosis: DiagnosisResult;
+  /**
+   * True when the diagnosis confidence was below the trust threshold. The fix
+   * loop still runs on a low-confidence diagnosis, but the report surfaces this
+   * so a shaky guess isn't presented as a certain diagnosis.
+   */
+  lowConfidenceDiagnosis: boolean;
   errorBefore: string;
   filesChanged: string[];
   diff: string;

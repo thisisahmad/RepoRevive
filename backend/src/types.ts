@@ -10,7 +10,11 @@ export type JobStatus =
   | 'succeeded'
   | 'failed'
   | 'failed_unfixable' // reflection stopped the loop early: not fixable within this approach
-  | 'unsupported_stack';
+  | 'unsupported_stack'
+  // Structural input problems caught before install/fix loop ever runs:
+  | 'invalid_manifest' // package.json/pyproject.toml exists but doesn't parse
+  | 'conflicting_manifests' // requirements.txt vs pyproject.toml disagree on a package version
+  | 'engine_version_mismatch'; // engines.node incompatible with the build image's Node
 
 export type Language = 'node' | 'python';
 export type PackageManager = 'npm' | 'yarn' | 'pnpm' | 'pip' | 'poetry';
@@ -23,6 +27,13 @@ export interface StackInfo {
   startCommand: string | null;
   /** 'scripts.start' or the filename we fell back to */
   entryPoint: string | null;
+  /**
+   * Node repos only: true when package.json has no lockfile
+   * (package-lock.json/yarn.lock/pnpm-lock.yaml). Not fatal — install will
+   * generate one — but surfaced in the report as a known condition. Always
+   * false for Python.
+   */
+  noLockfile: boolean;
 }
 
 export interface Job {

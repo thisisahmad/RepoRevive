@@ -69,6 +69,7 @@ async function detectNode(exec: ScopedExec, files: Set<string>): Promise<DetectR
     };
   }
 
+  const hasLockfile = files.has('package-lock.json') || files.has('yarn.lock') || files.has('pnpm-lock.yaml');
   const packageManager = files.has('pnpm-lock.yaml') ? 'pnpm' : files.has('yarn.lock') ? 'yarn' : 'npm';
   const installCommand =
     packageManager === 'pnpm'
@@ -104,7 +105,7 @@ async function detectNode(exec: ScopedExec, files: Set<string>): Promise<DetectR
 
   return {
     kind: 'supported',
-    stack: { language: 'node', packageManager, installCommand, startCommand, entryPoint },
+    stack: { language: 'node', packageManager, installCommand, startCommand, entryPoint, noLockfile: !hasLockfile },
   };
 }
 
@@ -153,7 +154,7 @@ async function detectPython(exec: ScopedExec, files: Set<string>): Promise<Detec
 
   return {
     kind: 'supported',
-    stack: { language: 'python', packageManager, installCommand, startCommand, entryPoint },
+    stack: { language: 'python', packageManager, installCommand, startCommand, entryPoint, noLockfile: false },
   };
 }
 

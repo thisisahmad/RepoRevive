@@ -1,13 +1,15 @@
 import fs from 'fs';
 import path from 'path';
 import Docker from 'dockerode';
+import semver from 'semver';
+import { parse as parseToml } from 'smol-toml';
 import { config, resultsDir } from '../config';
 import { diagnoseFailure } from '../ai/diagnose';
 import { runFixAttempt } from '../ai/fixLoop';
 import { reflectOnAttempt } from '../ai/reflect';
 import { Reflection, ToolExecutors } from '../ai/types';
 import { appendAttempt, getJob, updateJob } from '../jobs/store';
-import { detectStack } from '../stack/detect';
+import { detectStack, ScopedExec } from '../stack/detect';
 import { StackInfo } from '../types';
 import { copyFileFromContainer, createJobContainer, destroyContainer, execInContainer, ExecResult } from './docker';
 
@@ -33,6 +35,188 @@ function fail(jobId: string, error: string): void {
 
 function combinedLog(result: ExecResult): string {
   return tail([result.stderr, result.stdout].filter(Boolean).join('\n'));
+}
+
+/* ==========================================================================
+ * Pre-flight structural validation of the cloned repo's manifests.
+ *
+ * Runs inside the detect container AFTER clone and BEFORE stack detection,
+ * install, or the AI fix loop. The point is to catch broken/conflicting
+ * input data up front and stop with a specific status, rather than letting
+ * it crash the parser, fail install cryptically, or — worst of all — get
+ * handed to the fix loop, whose read_file/write_file/run_command tools could
+ * make unrelated destructive changes trying to "fix" a structural problem.
+ *
+ * Handled (each stops the pipeline before install, except missing lockfile):
+ *   - Malformed package.json (invalid JSON)            -> invalid_manifest
+ *   - Malformed pyproject.toml (invalid TOML)          -> invalid_manifest
+ *   - requirements.txt vs pyproject.toml disagreeing
+ *     on the same package's version                    -> conflicting_manifests
+ *   - engines.node incompatible with the Node image    -> engine_version_mismatch
+ *   - package.json with no lockfile                    -> NOT fatal; recorded
+ *                                                         as stack.noLockfile
+ *
+ * NOT handled (out of scope for this step):
+ *   - Monorepos / multiple package.json files (rejected separately as an
+ *     unsupported_variant during stack detection)
+ *   - Private package registries requiring auth
+ *   - Git submodules
+ *   - Malformed requirements.txt beyond simple "name==version" lines
+ *   - Lockfile-vs-manifest version drift
+ *   - Python version constraints (requires-python) vs the Python image
+ * ========================================================================== */
+
+export type RepoValidation =
+  | { kind: 'ok' }
+  | { kind: 'invalid_manifest'; message: string }
+  | { kind: 'conflicting_manifests'; message: string }
+  | { kind: 'engine_version_mismatch'; message: string };
+
+/** cat a file inside the container; null when it doesn't exist. */
+async function readIfExists(exec: ScopedExec, filePath: string): Promise<string | null> {
+  const result = await exec(['cat', filePath]);
+  return result.exitCode === 0 ? result.stdout : null;
+}
+
+/** node:20 -> "20"; falls back to 20 if the image tag is unexpected. */
+function nodeMajorFromImage(image: string): string {
+  const match = image.match(/node:(\d+)/);
+  return match ? match[1] : '20';
+}
+
+/** PyPI treats "_", "-", "." and case as equivalent — normalize before comparing. */
+function normalizePkgName(name: string): string {
+  return name.trim().toLowerCase().replace(/[_.]+/g, '-');
+}
+
+/** First concrete numeric version in a spec (e.g. "^2.0.1" -> "2.0.1"), or null. */
+function extractBaseVersion(spec: string): string | null {
+  const match = spec.match(/\d+(?:\.\d+)*/);
+  return match ? match[0] : null;
+}
+
+interface DepSpec {
+  raw: string;
+  base: string | null;
+}
+
+/** Parse simple "name==1.2.3" / "name>=1.0" lines; skips options, URLs, comments. */
+function parseRequirements(content: string): Map<string, DepSpec> {
+  const deps = new Map<string, DepSpec>();
+  for (const line of content.split('\n')) {
+    const stripped = line.replace(/#.*$/, '').trim();
+    if (!stripped || stripped.startsWith('-') || /^[a-z+]+:\/\//i.test(stripped) || stripped.includes('@')) continue;
+    const match = stripped.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$/);
+    if (!match) continue;
+    const spec = match[2].trim();
+    deps.set(normalizePkgName(match[1]), { raw: spec || '(any)', base: extractBaseVersion(spec) });
+  }
+  return deps;
+}
+
+/** Pull dependency specs out of a parsed pyproject: Poetry table + PEP 621 array. */
+function parsePyprojectDeps(parsed: Record<string, unknown>): Map<string, DepSpec> {
+  const deps = new Map<string, DepSpec>();
+
+  const poetryDeps = (parsed?.tool as any)?.poetry?.dependencies;
+  if (poetryDeps && typeof poetryDeps === 'object') {
+    for (const [name, value] of Object.entries(poetryDeps)) {
+      if (normalizePkgName(name) === 'python') continue;
+      const raw = typeof value === 'string' ? value : typeof (value as any)?.version === 'string' ? (value as any).version : '';
+      deps.set(normalizePkgName(name), { raw: raw || '(any)', base: extractBaseVersion(raw) });
+    }
+  }
+
+  const projectDeps = (parsed?.project as any)?.dependencies;
+  if (Array.isArray(projectDeps)) {
+    for (const entry of projectDeps) {
+      if (typeof entry !== 'string') continue;
+      const match = entry.match(/^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*(.*)$/);
+      if (!match) continue;
+      const spec = match[2].trim();
+      deps.set(normalizePkgName(match[1]), { raw: spec || '(any)', base: extractBaseVersion(spec) });
+    }
+  }
+
+  return deps;
+}
+
+/** Same package pinned to different concrete versions across the two manifests. */
+function findManifestConflicts(reqContent: string, pyContent: string, pyParsed: Record<string, unknown>): string[] {
+  const reqDeps = parseRequirements(reqContent);
+  const pyDeps = parsePyprojectDeps(pyParsed);
+  const conflicts: string[] = [];
+  for (const [name, reqSpec] of reqDeps) {
+    const pySpec = pyDeps.get(name);
+    if (pySpec && reqSpec.base && pySpec.base && reqSpec.base !== pySpec.base) {
+      conflicts.push(`${name} (requirements.txt: ${reqSpec.raw}, pyproject.toml: ${pySpec.raw})`);
+    }
+  }
+  return conflicts;
+}
+
+/**
+ * See the block comment above for the full handled/not-handled list. Returns
+ * 'ok' when nothing structural is wrong; otherwise a specific problem the
+ * caller maps to a terminal job status.
+ */
+export async function validateRepoInputs(exec: ScopedExec): Promise<RepoValidation> {
+  const [pkgJson, requirementsTxt, pyprojectToml] = await Promise.all([
+    readIfExists(exec, 'package.json'),
+    readIfExists(exec, 'requirements.txt'),
+    readIfExists(exec, 'pyproject.toml'),
+  ]);
+
+  // ---- package.json: must be valid JSON; engines.node must allow our image ----
+  if (pkgJson !== null) {
+    let pkg: { engines?: { node?: unknown } };
+    try {
+      pkg = JSON.parse(pkgJson);
+    } catch {
+      return { kind: 'invalid_manifest', message: 'package.json exists but is not valid JSON.' };
+    }
+
+    const enginesNode = pkg.engines?.node;
+    if (typeof enginesNode === 'string' && enginesNode.trim()) {
+      const range = enginesNode.trim();
+      const imageMajor = nodeMajorFromImage(config.images.node);
+      try {
+        // Does the required range overlap the Node major line the image ships?
+        // e.g. ">=22" has no overlap with "20.x" -> mismatch.
+        if (semver.validRange(range) && !semver.intersects(range, `${imageMajor}.x`)) {
+          return {
+            kind: 'engine_version_mismatch',
+            message: `package.json requires Node "${range}" (engines.node), but the build image provides Node ${imageMajor}.x.`,
+          };
+        }
+      } catch {
+        // Unparseable range — don't block; let install proceed as before.
+      }
+    }
+  }
+
+  // ---- pyproject.toml: must be valid TOML ----
+  let pyParsed: Record<string, unknown> | null = null;
+  if (pyprojectToml !== null) {
+    try {
+      pyParsed = parseToml(pyprojectToml) as Record<string, unknown>;
+    } catch {
+      return { kind: 'invalid_manifest', message: 'pyproject.toml exists but is not valid TOML.' };
+    }
+  }
+
+  // ---- requirements.txt vs pyproject.toml: no conflicting pinned versions ----
+  if (requirementsTxt !== null && pyprojectToml !== null && pyParsed !== null) {
+    const conflicts = findManifestConflicts(requirementsTxt, pyprojectToml, pyParsed);
+    if (conflicts.length > 0) {
+      return {
+        kind: 'conflicting_manifests',
+        message: `requirements.txt and pyproject.toml specify conflicting versions for: ${conflicts.join('; ')}.`,
+      };
+    }
+  }
+
+  return { kind: 'ok' };
 }
 
 /**
@@ -127,6 +311,9 @@ export async function attemptFix(
 
     const manifestContent = await readManifestContent(stack, tools);
     const diagnosis = await diagnoseFailure(jobId, container.id, currentError, manifestContent);
+    // A low-confidence diagnosis still gets a fix attempt — we just flag it so
+    // the report shows a shaky guess as such rather than as a certain call.
+    const lowConfidenceDiagnosis = diagnosis.confidence < config.ai.lowConfidenceThreshold;
     const errorBefore = currentError;
     const fixResult = await runFixAttempt(currentError, diagnosis, tools, priorReflection);
 
@@ -175,6 +362,7 @@ export async function attemptFix(
     appendAttempt(jobId, {
       attemptNumber,
       diagnosis,
+      lowConfidenceDiagnosis,
       errorBefore,
       filesChanged: fixResult.filesChanged,
       diff: fixResult.diff,
@@ -235,7 +423,17 @@ export async function processJob(jobId: string): Promise<void> {
       }
 
       updateJob(jobId, { status: 'detecting' });
-      const detected = await detectStack((cmd) => execInContainer(detectContainer, cmd, { workdir, timeoutMs: 30_000 }));
+      const scopedExec: ScopedExec = (cmd) => execInContainer(detectContainer, cmd, { workdir, timeoutMs: 30_000 });
+
+      // Catch broken/conflicting input data before install or the fix loop —
+      // these are structural problems the AI tools shouldn't be turned loose on.
+      const validation = await validateRepoInputs(scopedExec);
+      if (validation.kind !== 'ok') {
+        updateJob(jobId, { status: validation.kind, error: validation.message });
+        return;
+      }
+
+      const detected = await detectStack(scopedExec);
 
       if (detected.kind === 'not_found') {
         updateJob(jobId, {

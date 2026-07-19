@@ -72,15 +72,22 @@ See the [root README's API reference](../README.md#api-reference) for the full t
 
 ## How a job runs
 
-1. **Detect** — a throwaway `alpine/git` container shallow-clones the repo and the root is inspected:
-   `package.json` → Node, `requirements.txt`/`pyproject.toml` → Python. Monorepos and Pipenv repos are
-   recognized and rejected with a specific message rather than attempted.
+1. **Detect + validate** — a throwaway `alpine/git` container shallow-clones the repo and the root is
+   inspected: `package.json` → Node, `requirements.txt`/`pyproject.toml` → Python. Monorepos and Pipenv
+   repos are recognized and rejected with a specific message rather than attempted. Before anything is
+   installed, `validateRepoInputs()` catches structural input problems and stops with a specific status —
+   `invalid_manifest` (package.json isn't valid JSON / pyproject.toml isn't valid TOML),
+   `conflicting_manifests` (requirements.txt and pyproject.toml pin the same package to different
+   versions), or `engine_version_mismatch` (`engines.node` can't be satisfied by the build image). A
+   Node repo with no lockfile isn't fatal — it's recorded as `stack.noLockfile` and surfaced in the report.
 2. **Run** — a fresh `node:20` or `python:3.12` container (1 GiB RAM, 1 CPU, pids limit,
    `no-new-privileges`, no host mounts) installs, then runs the start command under a timeout. Still
    alive when the timer fires, or a clean quick exit — both count as success.
 3. **On failure** — `diagnoseFailure()` classifies the error (deprecated package, breaking change,
-   native build failure, missing env var, version mismatch, unknown), optionally suggests a specific
-   upgrade, then `runFixAttempt()` gets a bounded tool-calling session to fix it. Reinstall + rerun,
+   native build failure, missing env var, version mismatch, unknown) with a confidence score and a list
+   of unverified assumptions; a diagnosis below the confidence threshold still runs but is flagged
+   `lowConfidenceDiagnosis` so the report doesn't present a guess as fact. It optionally suggests a
+   specific upgrade, then `runFixAttempt()` gets a bounded tool-calling session to fix it. Reinstall + rerun,
    then `reflectOnAttempt()` reasons about what happened — why the change didn't work and what to try
    next — and that reflection steers the next attempt's prompt so retries aren't blind. Repeat up to 5
    times; if reflection decides the failure isn't fixable within this approach (e.g. a missing paid API

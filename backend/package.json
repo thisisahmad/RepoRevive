@@ -19,6 +19,8 @@
     "express": "^4.19.2",
     "jsonwebtoken": "^9.0.2",
     "openai": "^4.100.0",
+    "semver": "^7.8.5",
+    "smol-toml": "^1.7.0",
     "tar-stream": "^3.2.0"
   },
   "devDependencies": {
@@ -30,6 +32,7 @@
     "@types/express": "^4.17.21",
     "@types/jsonwebtoken": "^9.0.6",
     "@types/node": "^20.17.0",
+    "@types/semver": "^7.7.1",
     "@types/tar-stream": "^3.1.4",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"

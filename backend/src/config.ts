@@ -23,6 +23,9 @@ export const config = {
     model: 'gpt-4o-mini',
     maxFixAttempts: 5,
     maxToolRoundsPerAttempt: 8,
+    // Below this diagnosis confidence we still run the fix loop, but flag the
+    // attempt as low-confidence so the report doesn't present a guess as fact.
+    lowConfidenceThreshold: 0.4,
   },
 } as const;
 
