@@ -9,6 +9,7 @@ export type JobStatus =
   | 'fixing' // AI diagnose+fix loop in progress
   | 'succeeded'
   | 'failed'
+  | 'failed_unfixable' // reflection stopped the loop early: not fixable within this approach
   | 'unsupported_stack';
 
 export type Language = 'node' | 'python';

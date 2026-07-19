@@ -186,20 +186,26 @@ function ResultPanel({ job }) {
     )
   }
 
+  const unfixable = job.status === 'failed_unfixable'
+
   return (
     <div className="space-y-3 p-6">
       <div className="flex items-center gap-2 text-error">
         <svg viewBox="0 0 16 16" className="h-4 w-4" fill="none">
           <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
         </svg>
-        <span className="font-mono text-sm font-medium">Failed after install/run</span>
+        <span className="font-mono text-sm font-medium">
+          {unfixable ? 'Stopped early — judged unfixable' : 'Failed after install/run'}
+        </span>
       </div>
       {job.stack && <StackSummary stack={job.stack} />}
       <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded-lg bg-background/60 p-3 font-mono text-xs leading-relaxed text-error/90">
         {job.error}
       </pre>
       <p className="font-mono text-xs text-muted-dark">
-        The AI auto-fix loop isn't wired up yet — this MVP stops here for now.
+        {unfixable
+          ? "The AI reflected on its attempts and concluded this failure can't be fixed within the current approach — see the report for its reasoning."
+          : 'The AI auto-fix loop exhausted its attempts. See the report for the full reasoning trace.'}
       </p>
       <ViewReportLink jobId={job.id} />
     </div>

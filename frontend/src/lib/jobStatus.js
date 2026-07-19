@@ -7,5 +7,6 @@ export const STATUS_META = {
   fixing: { label: 'Fixing', color: 'text-foreground', dot: 'bg-accent' },
   succeeded: { label: 'Succeeded', color: 'text-accent', dot: 'bg-accent' },
   failed: { label: 'Failed', color: 'text-error', dot: 'bg-error' },
+  failed_unfixable: { label: 'Unfixable', color: 'text-error', dot: 'bg-error' },
   unsupported_stack: { label: 'Unsupported', color: 'text-yellow-500', dot: 'bg-yellow-500' },
 }

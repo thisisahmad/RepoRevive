@@ -4,7 +4,8 @@ import Docker from 'dockerode';
 import { config, resultsDir } from '../config';
 import { diagnoseFailure } from '../ai/diagnose';
 import { runFixAttempt } from '../ai/fixLoop';
-import { ToolExecutors } from '../ai/types';
+import { reflectOnAttempt } from '../ai/reflect';
+import { Reflection, ToolExecutors } from '../ai/types';
 import { appendAttempt, getJob, updateJob } from '../jobs/store';
 import { detectStack } from '../stack/detect';
 import { StackInfo } from '../types';
@@ -87,11 +88,28 @@ async function readManifestContent(stack: StackInfo, tools: ToolExecutors): Prom
 }
 
 /**
+ * Outcome of the whole fix loop.
+ * - succeeded: a re-test passed.
+ * - unfixable: reflection stopped the loop early because the failure isn't
+ *   fixable within this approach (e.g. a missing paid API key). When true,
+ *   succeeded is always false.
+ */
+export interface AttemptFixResult {
+  succeeded: boolean;
+  unfixable: boolean;
+}
+
+/**
  * Up to config.ai.maxFixAttempts rounds of: diagnose the current error,
- * hand that diagnosis + the tool-calling loop a shot at fixing it, then
- * re-test by reinstalling and rerunning. Returns true the moment a retest
- * succeeds; false once attempts are exhausted. Diagnosis is a pre-step, not
- * an attempt in its own right — it doesn't count against the cap.
+ * hand that diagnosis + the tool-calling loop a shot at fixing it, re-test
+ * by reinstalling and rerunning, then reflect on what happened before
+ * deciding whether to retry. Diagnosis is a pre-step, not an attempt in its
+ * own right — it doesn't count against the cap.
+ *
+ * The 5-attempt cap is a hard ceiling. Reflection can only stop the loop
+ * EARLY (via shouldRetry: false), never extend it. Each attempt after the
+ * first is steered by the previous attempt's reflection, so retries are
+ * informed rather than blind.
  */
 export async function attemptFix(
   jobId: string,
@@ -99,52 +117,87 @@ export async function attemptFix(
   workdir: string,
   stack: StackInfo,
   initialErrorLog: string
-): Promise<boolean> {
+): Promise<AttemptFixResult> {
   const tools = makeToolExecutors(container, workdir);
   let currentError = initialErrorLog;
+  let priorReflection: Reflection | null = null;
 
   for (let attemptNumber = 1; attemptNumber <= config.ai.maxFixAttempts; attemptNumber++) {
     updateJob(jobId, { status: 'fixing' });
 
     const manifestContent = await readManifestContent(stack, tools);
     const diagnosis = await diagnoseFailure(jobId, container.id, currentError, manifestContent);
-    const fixResult = await runFixAttempt(currentError, diagnosis, tools);
+    const errorBefore = currentError;
+    const fixResult = await runFixAttempt(currentError, diagnosis, tools, priorReflection);
 
-    appendAttempt(jobId, {
-      attemptNumber,
-      diagnosis,
-      errorBefore: currentError,
-      filesChanged: fixResult.filesChanged,
-      diff: fixResult.diff,
-      explanation: fixResult.explanation,
-      timestamp: new Date().toISOString(),
-    });
-
+    // ---- re-test: reinstall, then rerun (unless install itself failed) ----
     updateJob(jobId, { status: 'installing' });
     const install = await execInContainer(container, ['sh', '-c', stack.installCommand], {
       workdir,
       timeoutMs: config.installTimeoutMs,
     });
+
+    let succeeded = false;
+    let retestCommand = stack.installCommand;
+    let outcomeError: string | null = null;
+
     if (install.timedOut || install.exitCode !== 0) {
-      currentError = install.timedOut
+      outcomeError = install.timedOut
         ? `Install timed out after ${config.installTimeoutMs / 1000}s (${stack.installCommand})`
         : `Install failed (${stack.installCommand}):\n${combinedLog(install)}`;
-      continue;
+    } else {
+      updateJob(jobId, { status: 'running' });
+      retestCommand = stack.startCommand!;
+      const run = await execInContainer(
+        container,
+        ['sh', '-c', `timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand!)}`],
+        { workdir, timeoutMs: (config.runTimeoutSec + 30) * 1000 }
+      );
+      if (run.exitCode === 0 || run.exitCode === 124) {
+        succeeded = true;
+      } else {
+        outcomeError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
+      }
     }
 
-    updateJob(jobId, { status: 'running' });
-    const run = await execInContainer(
-      container,
-      ['sh', '-c', `timeout -k 5 ${config.runTimeoutSec} sh -c ${shellQuote(stack.startCommand!)}`],
-      { workdir, timeoutMs: (config.runTimeoutSec + 30) * 1000 }
-    );
-    if (run.exitCode === 0 || run.exitCode === 124) {
-      return true;
+    // ---- reflection step: between "attempt result comes back" and "decide whether to retry" ----
+    const reflection = await reflectOnAttempt({
+      attemptNumber,
+      errorBefore,
+      filesChanged: fixResult.filesChanged,
+      diff: fixResult.diff,
+      explanation: fixResult.explanation,
+      retestCommand,
+      succeeded,
+      outcomeError,
+    });
+
+    appendAttempt(jobId, {
+      attemptNumber,
+      diagnosis,
+      errorBefore,
+      filesChanged: fixResult.filesChanged,
+      diff: fixResult.diff,
+      explanation: fixResult.explanation,
+      reflection,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (succeeded) {
+      return { succeeded: true, unfixable: false };
     }
-    currentError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
+
+    // Reflection can short-circuit the loop when the failure looks unfixable
+    // within this approach — no point burning the remaining attempts.
+    if (!reflection.shouldRetry) {
+      return { succeeded: false, unfixable: true };
+    }
+
+    currentError = outcomeError ?? currentError;
+    priorReflection = reflection;
   }
 
-  return false;
+  return { succeeded: false, unfixable: false };
 }
 
 /**
@@ -235,14 +288,14 @@ export async function processJob(jobId: string): Promise<void> {
       timeoutMs: config.installTimeoutMs,
     });
 
-    let succeeded: boolean;
+    let fixResult: AttemptFixResult = { succeeded: false, unfixable: false };
     let lastError: string | null = null;
 
     if (install.timedOut || install.exitCode !== 0) {
       lastError = install.timedOut
         ? `Install timed out after ${config.installTimeoutMs / 1000}s (${stack.installCommand})`
         : `Install failed (${stack.installCommand}):\n${combinedLog(install)}`;
-      succeeded = await attemptFix(jobId, container, workdir, stack, lastError);
+      fixResult = await attemptFix(jobId, container, workdir, stack, lastError);
     } else {
       updateJob(jobId, { status: 'running' });
       // `timeout <n>` inside the container: exit 124 means the process was
@@ -255,15 +308,19 @@ export async function processJob(jobId: string): Promise<void> {
         { workdir, timeoutMs: (config.runTimeoutSec + 30) * 1000 }
       );
       if (run.exitCode === 0 || run.exitCode === 124) {
-        succeeded = true;
+        fixResult = { succeeded: true, unfixable: false };
       } else {
         lastError = `App crashed (exit ${run.exitCode ?? 'unknown'}) running "${stack.startCommand}":\n${combinedLog(run)}`;
-        succeeded = await attemptFix(jobId, container, workdir, stack, lastError);
+        fixResult = await attemptFix(jobId, container, workdir, stack, lastError);
       }
     }
 
-    if (!succeeded) {
-      fail(jobId, lastError ?? 'Unknown failure.');
+    if (!fixResult.succeeded) {
+      if (fixResult.unfixable) {
+        updateJob(jobId, { status: 'failed_unfixable', error: lastError ?? 'The failure was judged unfixable within the current approach.' });
+      } else {
+        fail(jobId, lastError ?? 'Unknown failure.');
+      }
       return;
     }
 

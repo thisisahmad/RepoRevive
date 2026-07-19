@@ -81,7 +81,11 @@ See the [root README's API reference](../README.md#api-reference) for the full t
 3. **On failure** — `diagnoseFailure()` classifies the error (deprecated package, breaking change,
    native build failure, missing env var, version mismatch, unknown), optionally suggests a specific
    upgrade, then `runFixAttempt()` gets a bounded tool-calling session to fix it. Reinstall + rerun,
-   repeat up to 5 times. Diagnosis is a pre-step, not an attempt — it doesn't count against the cap.
+   then `reflectOnAttempt()` reasons about what happened — why the change didn't work and what to try
+   next — and that reflection steers the next attempt's prompt so retries aren't blind. Repeat up to 5
+   times; if reflection decides the failure isn't fixable within this approach (e.g. a missing paid API
+   key) it stops early and marks the job `failed_unfixable` instead of burning the remaining attempts.
+   Diagnosis and reflection are per-attempt steps, not attempts themselves — they don't count against the cap.
 4. **On success** — the workspace is zipped inside the container (`apt-get install zip`, since neither
    base image ships it) and copied out via Docker's archive API before the container is destroyed.
 

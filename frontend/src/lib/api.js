@@ -1,6 +1,6 @@
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000'
 
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'unsupported_stack'])
+const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'failed_unfixable', 'unsupported_stack'])
 
 export function isTerminalStatus(status) {
   return TERMINAL_STATUSES.has(status)

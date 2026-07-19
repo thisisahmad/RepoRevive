@@ -23,6 +23,43 @@ export interface DiagnosisResult {
   suggestedUpgrade: SuggestedUpgrade | null;
 }
 
+/**
+ * The model's post-mortem on a single fix attempt, produced after the
+ * change was re-tested. Drives whether the loop retries and, if so, with
+ * what new direction — stored on the attempt so the report reads as a
+ * reasoning trace, not just a pile of diffs.
+ */
+export interface Reflection {
+  attemptFailed: boolean;
+  /** Plain English: why the last change didn't fix it, or what it broke. */
+  failureReason: string;
+  /** Summary of what the previous attempt actually modified. */
+  whatChanged: string;
+  /** Plain English: what to try differently next, given this failure. */
+  nextStrategy: string;
+  /** false => stop early; the issue looks unfixable within this approach. */
+  shouldRetry: boolean;
+  /** 0-1: how confident the model is that nextStrategy will work. */
+  confidence: number;
+}
+
+/** Everything reflectOnAttempt needs to reason about one finished attempt. */
+export interface ReflectionInput {
+  attemptNumber: number;
+  /** The error that existed before this attempt ran. */
+  errorBefore: string;
+  filesChanged: string[];
+  diff: string;
+  /** The fixer's own summary of what it changed. */
+  explanation: string;
+  /** The command run to re-test the change (install or start command). */
+  retestCommand: string;
+  /** Whether the re-test passed. */
+  succeeded: boolean;
+  /** The new error/outcome after the change, or null when it succeeded. */
+  outcomeError: string | null;
+}
+
 export interface FixAttempt {
   attemptNumber: number;
   diagnosis: DiagnosisResult;
@@ -30,6 +67,7 @@ export interface FixAttempt {
   filesChanged: string[];
   diff: string;
   explanation: string;
+  reflection: Reflection;
   timestamp: string;
 }
 

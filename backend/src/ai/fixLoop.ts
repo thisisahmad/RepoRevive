@@ -3,7 +3,7 @@ import OpenAI from 'openai';
 import { config } from '../config';
 import { openai } from './client';
 import { FIX_LOOP_SYSTEM_PROMPT } from './prompts/fixLoopPrompt';
-import { DiagnosisResult, FixLoopResult, ToolExecutors } from './types';
+import { DiagnosisResult, FixLoopResult, Reflection, ToolExecutors } from './types';
 
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 type ToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
@@ -62,13 +62,40 @@ function diagnosisContextBlock(diagnosis: DiagnosisResult): string {
 }
 
 /**
+ * Turns the previous attempt's reflection into explicit steering for this
+ * attempt. This is what makes the loop's prompt evolve across attempts:
+ * instead of just re-sending the error, we tell the fixer why the last fix
+ * didn't work and which direction to try instead.
+ */
+function reflectionContextBlock(reflection: Reflection): string {
+  return [
+    'A previous automated fix attempt did NOT resolve the failure. Learn from it — do not repeat the same approach.',
+    `Why the last change didn't work: ${reflection.failureReason}`,
+    `What the last attempt changed: ${reflection.whatChanged}`,
+    `Direction to try now instead: ${reflection.nextStrategy}`,
+  ].join('\n');
+}
+
+/**
  * Runs one bounded tool-calling session against a live container, trying to
  * fix the reported error. Never touches Docker directly — all container
  * access goes through the injected ToolExecutors, which pipeline.ts (the
  * only module allowed to import dockerode) implements.
+ *
+ * When a priorReflection is supplied (every attempt after the first), its
+ * reasoning is injected into the system prompt so this attempt is informed
+ * by the last one rather than blind.
  */
-export async function runFixAttempt(errorLog: string, diagnosis: DiagnosisResult, tools: ToolExecutors): Promise<FixLoopResult> {
-  const systemPrompt = `${FIX_LOOP_SYSTEM_PROMPT}\n\n--- Diagnosis for this failure ---\n${diagnosisContextBlock(diagnosis)}`;
+export async function runFixAttempt(
+  errorLog: string,
+  diagnosis: DiagnosisResult,
+  tools: ToolExecutors,
+  priorReflection?: Reflection | null
+): Promise<FixLoopResult> {
+  let systemPrompt = `${FIX_LOOP_SYSTEM_PROMPT}\n\n--- Diagnosis for this failure ---\n${diagnosisContextBlock(diagnosis)}`;
+  if (priorReflection) {
+    systemPrompt += `\n\n--- Reflection on the previous fix attempt ---\n${reflectionContextBlock(priorReflection)}`;
+  }
   const changedFiles = new Map<string, { before: string | null; after: string }>();
 
   const messages: ChatMessage[] = [
