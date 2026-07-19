@@ -101,9 +101,9 @@ See the [root README's API reference](../README.md#api-reference) for the full t
 ## Quick test
 
 ```bash
-# succeeds via npm
+# installs and runs cleanly (verified by the eval harness)
 curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" \
-  -H "Authorization: Bearer <token>" -d "{\"repoUrl\":\"https://github.com/heroku/node-js-sample\"}"
+  -H "Authorization: Bearer <token>" -d "{\"repoUrl\":\"https://github.com/Azure-Samples/python-docs-hello-world\"}"
 
 # a real monorepo — should report the specific reason, not a generic failure
 curl -s -X POST http://localhost:3000/api/jobs -H "Content-Type: application/json" \

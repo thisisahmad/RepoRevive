@@ -21,150 +21,181 @@
   <img src="docs/screenshots/hero.png" alt="RepoRevive landing page" width="100%">
 </p>
 
-RepoRevive clones a public GitHub repo into an isolated Docker container, detects its stack, installs
-and runs it, and — if that fails — has an AI diagnose *why* before attempting a fix. Every run produces
-a plain-English report: what broke, what was tried, and either a downloadable working zip or an honest
-account of what couldn't be fixed.
-
-It's a portfolio-scale demo of an end-to-end AI agent pipeline: sandboxed execution, tool-calling
-constrained to three explicit actions, and a UI that shows its work rather than a black box.
-
-<p align="center">
-  <img src="docs/screenshots/dashboard.png" alt="RepoRevive dashboard — job running, stats, and history" width="100%">
-</p>
-
 ---
 
 ## Contents
 
-- [How it works](#how-it-works)
-- [Features](#features)
+- [What it does](#what-it-does)
+- [Architecture](#architecture)
+- [Guardrails](#guardrails)
 - [Tech stack](#tech-stack)
 - [Project structure](#project-structure)
 - [Getting started](#getting-started)
 - [Environment variables](#environment-variables)
 - [API reference](#api-reference)
 - [Job lifecycle](#job-lifecycle)
-- [Isolation & security model](#isolation--security-model)
-- [Out of scope](#out-of-scope-by-design)
+- [Evals](#evals)
 - [Known limitations](#known-limitations)
+- [Out of scope](#out-of-scope-by-design)
 - [License](#license)
 
 ---
 
-## How it works
+## What it does
+
+You paste a link to a public GitHub repo. RepoRevive clones it into an isolated Docker container,
+figures out whether it's a Node or Python project, and tries to install and run it. If that fails, it
+asks an LLM to **diagnose** why, then runs a bounded **fix loop** that edits files and re-tests inside
+the container. Every job ends in one of two honest outcomes:
+
+- a **downloadable zip** of the repaired project (if it ended up running), or
+- a **plain-English report** of what broke, what was tried, and why it couldn't be fixed.
+
+The whole thing is a straight-line pipeline, not a swarm of autonomous agents — each stage is a real
+module under `backend/src`, and the LLM's only powers are three explicit tools scoped to one container.
+
+<p align="center">
+  <img src="docs/screenshots/dashboard.png" alt="RepoRevive dashboard — job running, stats, and history" width="100%">
+</p>
+
+## Architecture
+
+A job flows through these stages in order. Each maps to real code — there are no hidden "agents".
+
+1. **Intake** (`jobs/validate.ts`, `jobs/routes.ts`, `jobs/runner.ts`) — the URL is validated as a
+   well-formed `github.com/<owner>/<repo>` link (SSH URLs, embedded credentials, and non-GitHub hosts
+   are rejected). A job row is created, `202` is returned immediately, and a small in-process queue
+   picks it up so the API never blocks on a clone.
+2. **Clone + stack detection** (`sandbox/pipeline.ts` → `stack/detect.ts`) — a throwaway `alpine/git`
+   container shallow-clones the repo, and the root is inspected: `package.json` → Node (npm / yarn /
+   pnpm by lockfile), `requirements.txt` / `pyproject.toml` → Python (pip or Poetry). Monorepos
+   (workspaces / Lerna / Nx) and Pipenv repos are recognized and reported with a specific reason
+   rather than a generic failure; a repo with no supported manifest ends as `unsupported_stack`.
+3. **Structural validation** (`validateRepoInputs()` in `pipeline.ts`) — before anything is installed,
+   the manifests are checked for structural problems and the pipeline stops early with a specific
+   status if it finds one (see [Guardrails](#guardrails)).
+4. **Sandboxed install + run** (`sandbox/pipeline.ts` → `sandbox/docker.ts`) — a fresh `node:20` or
+   `python:3.12` container clones the repo again, installs dependencies, and runs the detected start
+   command under a short run timeout. A server still alive when the timer fires (`exit 124`) or a
+   script that exits cleanly (`exit 0`) both count as **running**.
+5. **Diagnosis** (`ai/diagnose.ts`) — on an install/run failure, the error log + manifest are sent to
+   the model, which classifies the failure into one of a fixed set of categories and returns a
+   `confidence` score plus a list of unverified `assumptions`. A low-confidence diagnosis
+   (below `0.4`) still proceeds to the fix loop but is flagged so the report shows a guess as a guess.
+   For package failures a follow-up call (`ai/upgradeSuggest.ts`) may propose a specific upgrade path.
+6. **Fix loop with reflection** (`ai/fixLoop.ts` + `ai/reflect.ts`, driven by `attemptFix()` in
+   `pipeline.ts`) — the diagnosis feeds a tool-calling attempt limited to three tools
+   (`read_file`, `write_file`, `run_command`). After each attempt the container is re-installed and
+   re-run, then `reflectOnAttempt()` reasons about *why* the change didn't work and what to try next;
+   that reflection is injected into the next attempt's prompt, so retries are informed, not blind.
+7. **Report + delivery** (`report/build.ts`, `report/markdown.ts`) — on success the workspace is zipped
+   inside the container and copied out for download. Either way, the full attempt history, diagnoses,
+   reflections, and diffs are available as JSON or Markdown, and a structured event log is written per
+   job.
 
 ```
  paste a repo URL
         │
         ▼
-┌───────────────────┐   git clone --depth 1     ┌──────────────────────────┐
+┌────────────────────┐   git clone --depth 1     ┌──────────────────────────┐
 │  detect container  │ ─────────────────────────▶│  alpine/git (throwaway)  │
-│  (stack detection) │◀────────────────────────── │  read package.json /     │
-└─────────┬──────────┘   language + entrypoint    │  requirements.txt / etc. │
-          │                                        └──────────────────────────┘
+│  clone + detect +  │◀────────────────────────── │  read + validate         │
+│  manifest validate │   stack / structural check │  package.json / etc.     │
+└─────────┬──────────┘                            └──────────────────────────┘
+          │  ok
           ▼
-┌───────────────────────────────────────────────────────────────┐
-│  run container — node:20 or python:3.12, no host mounts,      │
-│  1 GiB RAM / 1 CPU / pids limit                                │
-│                                                                 │
-│   clone → install → run  ──── succeeds ────────────────────┐  │
-│      │                                                       │  │
-│      └── fails ──▶ diagnose (AI) ──▶ fix loop (AI, 3 tools) │  │
-│                        │                    │                │  │
-│                        │        retest install + run         │  │
-│                        │                    │                │  │
-│                        └── still broken? repeat, up to 5x ──┘  │
-│                                     │                            │
-│                              exhausted → failed                 │
-└───────────────────────────────────────────────────────────────┘
-                                     │
-                    succeeded ───────┴─────── failed / unsupported_stack
-                        │                              │
-                 zip + copy out                  attempts preserved
-                        │                              │
-                        ▼                              ▼
-               GET /jobs/:id/download        GET /jobs/:id/report(.md)
+┌───────────────────────────────────────────────────────────────────┐
+│  run container — node:20 or python:3.12                            │
+│  no host mounts · 1 GiB RAM · 1 CPU · 256 pids · no-new-privileges │
+│                                                                     │
+│   clone → install → run  ── running ───────────────────────────┐  │
+│      │                                                           │  │
+│      └── fails ─▶ diagnose (AI) ─▶ fix attempt (3 tools)        │  │
+│                        │                    │                    │  │
+│                        │      reinstall + rerun + reflect        │  │
+│                        │                    │                    │  │
+│              reflection says stop? ─ yes ─▶ failed_unfixable     │  │
+│                        │ no                                       │  │
+│                        └── retry, up to 5 attempts total ────────┘  │
+└───────────────────────────────────────────────────────────────────┘
+          │                                   │
+   running │                           still broken
+          ▼                                   ▼
+   zip + copy out                     failed / failed_unfixable
+   GET /jobs/:id/download             GET /jobs/:id/report(.md)
 ```
 
-The AI never gets a shell. When install or run fails, `pipeline.ts` — the only module allowed to import
-`dockerode` — hands the AI modules plain data (error logs, file contents) and a set of injected
-functions scoped to the job's own container. Everything under `src/ai/` only ever sees an `OpenAI`
-client and that interface.
+## Guardrails
 
-## Features
+- **Docker isolation.** The repo is cloned *inside* the container — never onto the host — and no host
+  volume is mounted. Each job uses a throwaway `alpine/git` container for detection and a fresh
+  `node:20`/`python:3.12` container for the run, and **both are destroyed in a `finally` block** when
+  the job ends, pass or fail.
+- **Resource limits.** Every container is capped at **1 GiB memory** (swap pinned equal to memory, so
+  no swap), **1 CPU**, a **256-process limit**, and runs with `no-new-privileges` (see
+  `sandbox/docker.ts`).
+- **The LLM cannot touch the host or the server.** Its only actions are three named tools —
+  `read_file`, `write_file`, `run_command`. `run_command` *does* run shell, but only inside the
+  disposable container, never on the host. Paths are confined to the job's workdir (`pipeline.ts`
+  strips absolute paths and `../` traversal), and file contents are base64-encoded before being
+  written so AI-authored text never needs shell-escaping.
+- **5-attempt hard cap.** The fix loop runs at most `config.ai.maxFixAttempts` (5) attempts. Diagnosis
+  and reflection are per-attempt sub-steps and do **not** count against the cap.
+- **Reflection can stop early.** If reflection concludes the failure isn't fixable within this approach
+  (e.g. it needs a paid API key or an external service), the loop stops before exhausting all 5
+  attempts and the job is marked `failed_unfixable` rather than burning the remaining tries.
+- **Structural manifest problems stop the pipeline before the AI runs.** `validateRepoInputs()` catches
+  broken input up front and ends the job with a specific status — `invalid_manifest` (package.json
+  isn't valid JSON / pyproject.toml isn't valid TOML), `conflicting_manifests` (requirements.txt and
+  pyproject.toml pin the same package to different versions), or `engine_version_mismatch`
+  (`engines.node` can't be satisfied by the build image). These are structural issues the fix loop's
+  tools shouldn't be turned loose on. (A Node repo with no lockfile is *not* fatal — it's recorded as
+  `stack.noLockfile` and surfaced in the report.)
+- **Ownership checks.** Every `/api/jobs/*` route requires a JWT and checks `job.userId === req.userId`,
+  returning `404` (not `403`) on a mismatch so job existence isn't leaked across users.
 
-**Repo intake**
-- Validates the URL is a well-formed `github.com/<owner>/<repo>` link before doing anything — rejects SSH URLs, embedded credentials, and non-GitHub hosts
-- Jobs are created and queued immediately (`202`), then processed by a small in-process worker so the API never blocks on a clone
-
-**Stack detection**
-- **Node** — npm, yarn, or pnpm by lockfile; corepack-pins a Node-20-compatible pnpm version when a repo doesn't declare its own; start command falls back `scripts.start` → `scripts.dev` → `index.js`/`server.js`/`app.js`/`src/index.js`/`main.js` → `package.json#main`
-- **Python** — pip or Poetry by `pyproject.toml` contents; entry fallback `app.py` → `main.py` → `manage.py` (run as a real Django `runserver`, not a bare invocation) → `wsgi.py` → `server.py`
-- Monorepos (npm/yarn/pnpm workspaces, Lerna, Nx) and Pipenv repos are recognized and reported with a specific explanation instead of a generic "unsupported" message
-
-**Sandboxed execution**
-- One throwaway container per job, no host volume mounts, memory/CPU/pids limits, `no-new-privileges`
-- A server that's still alive after the run timeout counts as success, same as a script that exits `0`
-
-**AI diagnosis + fix loop**
-- On failure, classifies the error into one of six categories (deprecated package, breaking major-version change, native build failure, missing env var, runtime version mismatch, unknown) via a structured JSON call
-- For package-related failures, a follow-up call suggests a specific upgrade path (`bcrypt@3.0.0 → bcrypt@5.1.0`, with a reason)
-- The diagnosis feeds into a tool-calling fix attempt with exactly three tools — `read_file`, `write_file`, `run_command` — scoped to the job's workspace, up to 5 attempts, re-testing install/run after each one
-- Falls back to `unknown` gracefully on any API error (bad key, network failure) rather than crashing the job
-
-**Reports & delivery**
-- `GET /jobs/:id/report` and `/report.md` show every attempt's diagnosis, explanation, diff, and files changed, plus a plain-English final outcome
-- Successful jobs are zipped inside the container and streamed back via `GET /jobs/:id/download`
-
-**Auth & dashboard**
-- Email/password auth with bcrypt + JWT; every job route is ownership-checked
-- A dashboard shows live job progress, a stats row (total / running / succeeded / failed), and full history
-- Anonymous visitors can paste a repo on the landing page — it's held in `sessionStorage` and revived automatically the moment they sign in, no re-typing
+> **Note on network:** containers are **not** network-restricted — outbound access is required to
+> `git clone` and to install packages from npm / PyPI. This is Docker-level isolation, not
+> microVM-grade sandboxing; see [Known limitations](#known-limitations).
 
 ## Tech stack
 
 | | |
 |---|---|
-| **Frontend** | React 19, React Router 7, Vite 8, Tailwind CSS 3, Framer Motion, Three.js (hero scene) |
-| **Backend** | Node.js ≥20, Express 4, TypeScript 5.9, better-sqlite3, dockerode, OpenAI SDK |
-| **Sandbox** | Docker (`alpine/git` for detection, `node:20` / `python:3.12` for execution) |
+| **Backend** | Node.js ≥20, Express 4, TypeScript, `dockerode`, OpenAI SDK, `better-sqlite3` (SQLite) |
+| **Sandbox** | Docker — `alpine/git` for detection, `node:20` / `python:3.12` for execution |
 | **Auth** | bcryptjs, jsonwebtoken |
+| **Frontend** | React 19, React Router 7, Vite, Tailwind CSS, Framer Motion, Three.js (hero scene) |
 
 ## Project structure
 
 ```
 reporevive/
 ├── backend/
-│   ├── src/
-│   │   ├── index.ts, app.ts        # entry point + express wiring
-│   │   ├── config.ts               # env vars, timeouts, image names, AI tunables
-│   │   ├── types.ts                # Job, StackInfo, JobStatus
-│   │   ├── db/                     # better-sqlite3 init + schema
-│   │   ├── auth/                   # register/login, JWT middleware
-│   │   ├── jobs/                   # routes, SQLite store, URL validation, async queue
-│   │   ├── stack/                  # Node/Python stack detection
-│   │   ├── sandbox/
-│   │   │   ├── docker.ts           # dockerode helpers (create/exec/destroy, archive extraction)
-│   │   │   └── pipeline.ts         # orchestrator — the only module touching both Docker and AI
-│   │   ├── ai/
-│   │   │   ├── client.ts           # OpenAI client singleton
-│   │   │   ├── diagnose.ts         # failure classification
-│   │   │   ├── upgradeSuggest.ts   # dependency upgrade suggestions
-│   │   │   ├── fixLoop.ts          # tool-calling fix attempt
-│   │   │   ├── types.ts            # DiagnosisResult, SuggestedUpgrade, FixAttempt, ToolExecutors
-│   │   │   └── prompts/            # system prompts, one file per AI call
-│   │   └── report/                 # JSON + Markdown report rendering
-│   └── storage/                    # SQLite DB + result zips (gitignored, created at runtime)
-│
-├── frontend/
 │   └── src/
-│       ├── pages/                  # Landing, Login, Register, Dashboard
-│       ├── components/             # ReviveWidget, JobHistoryList, DashboardStats, Hero, ...
-│       ├── context/                # AuthContext
-│       ├── hooks/                  # useJobPolling, useJobsList
-│       └── lib/                    # api client, job status labels, pending-repo handoff
+│       ├── index.ts, app.ts        # entry point + express wiring
+│       ├── config.ts               # env vars, timeouts, image names, AI tunables
+│       ├── types.ts                # Job, StackInfo, JobStatus
+│       ├── db/                     # better-sqlite3 init + schema
+│       ├── auth/                   # register/login, JWT middleware
+│       ├── jobs/                   # routes, SQLite store, URL validation, in-process queue
+│       ├── stack/detect.ts         # Node/Python stack detection
+│       ├── sandbox/
+│       │   ├── docker.ts           # dockerode helpers (create/exec/destroy, archive extraction)
+│       │   └── pipeline.ts         # orchestrator — the only module touching both Docker and AI
+│       ├── ai/
+│       │   ├── client.ts           # OpenAI client singleton
+│       │   ├── diagnose.ts         # failure classification (+ confidence, assumptions)
+│       │   ├── upgradeSuggest.ts   # dependency upgrade suggestions
+│       │   ├── fixLoop.ts          # tool-calling fix attempt (read_file/write_file/run_command)
+│       │   ├── reflect.ts          # post-attempt reflection that steers the next attempt
+│       │   ├── types.ts            # DiagnosisResult, Reflection, FixAttempt, ToolExecutors
+│       │   └── prompts/            # one system prompt per AI call
+│       ├── utils/logger.ts         # structured per-job JSON logging (console + storage/logs)
+│       └── report/                 # JSON + Markdown report rendering
 │
+├── frontend/src/                   # React app (pages, components, hooks, api client)
+├── evals/                          # evaluation harness — fixtures, runner, results, report
 └── docs/screenshots/
 ```
 
@@ -174,16 +205,17 @@ reporevive/
 
 - **Node.js 20+**
 - **Docker Desktop**, running, with Linux containers
-- An **OpenAI API key** — optional to run the app at all, but required for diagnosis/fix-loop to do
-  anything beyond falling back to `unknown` (see [Known limitations](#known-limitations))
+- An **OpenAI API key** — optional to boot the app, but the diagnosis/fix/reflect steps only do
+  something real with a key set (without one they fall back gracefully; see
+  [Known limitations](#known-limitations))
 
 ### Backend
 
 ```bash
 cd backend
 npm install
-cp .env.example .env    # edit JWT_SECRET / OPENAI_API_KEY as needed
-npm run dev              # http://localhost:3000
+cp .env.example .env    # then set JWT_SECRET / OPENAI_API_KEY
+npm run dev             # http://localhost:3000
 ```
 
 ### Frontend
@@ -191,11 +223,21 @@ npm run dev              # http://localhost:3000
 ```bash
 cd frontend
 npm install
-npm run dev              # http://localhost:5173
+npm run dev             # http://localhost:5173
 ```
 
-Open `http://localhost:5173`, register an account, and paste a public repo — try
-`https://github.com/heroku/node-js-sample` for a clean success path.
+Open `http://localhost:5173`, register an account, and paste a public repo. For a clean success path,
+try `https://github.com/Azure-Samples/python-docs-hello-world` (a tiny Python app that installs and
+runs as-is — verified by the eval harness).
+
+### One-command tests
+
+From `backend/`:
+
+```bash
+npm run smoke   # full end-to-end test over HTTP (auto-starts a server if none is running)
+npm run eval    # runs the fixture set through the pipeline, writes evals/results + evals/report.md
+```
 
 ## Environment variables
 
@@ -204,9 +246,9 @@ Open `http://localhost:5173`, register an account, and paste a public repo — t
 | Variable | Default | Description |
 |---|---|---|
 | `PORT` | `3000` | API port |
-| `JWT_SECRET` | — | Signing secret for auth tokens — change this in any real deployment |
-| `OPENAI_API_KEY` | — | Needed for diagnosis and the fix loop to actually classify/fix anything |
-| `STORAGE_DIR` | `./storage` | Where the SQLite DB and result zips live |
+| `JWT_SECRET` | `dev-secret-change-me` | Signing secret for auth tokens — change this in any real deployment |
+| `OPENAI_API_KEY` | — | Needed for diagnosis / fix / reflection to actually classify and fix |
+| `STORAGE_DIR` | `./storage` | Where the SQLite DB, result zips, and per-job logs live |
 | `MAX_CONCURRENT_JOBS` | `2` | How many jobs the in-process queue runs at once |
 
 **`frontend/.env`**
@@ -225,57 +267,70 @@ All `/api/jobs/*` routes require `Authorization: Bearer <token>` and are scoped 
 | `POST` | `/api/auth/login` | `{ email, password }` → `200 { token, user }` |
 | `POST` | `/api/jobs` | `{ repoUrl }` → `202 { id, status }`, processed asynchronously |
 | `GET` | `/api/jobs` | Current user's job history, newest first |
-| `GET` | `/api/jobs/:id` | Poll status, detected stack, attempts so far |
+| `GET` | `/api/jobs/:id` | Poll status, detected stack, and attempts so far |
 | `GET` | `/api/jobs/:id/download` | Streams the result zip (`succeeded` jobs only) |
-| `GET` | `/api/jobs/:id/report` | Structured JSON report — diagnosis, diffs, final outcome |
+| `GET` | `/api/jobs/:id/report` | Structured JSON report — diagnosis, reflections, diffs, outcome |
 | `GET` | `/api/jobs/:id/report.md` | Same report as a downloadable Markdown file |
-| `GET` | `/api/jobs/:id/logs` | Full structured log trace of the job as JSON (`{ jobId, events[] }`) |
+| `GET` | `/api/jobs/:id/logs` | Full structured log trace of the job (`{ jobId, events[] }`) |
 | `GET` | `/health` | Liveness check |
 
 ## Job lifecycle
 
 ```
-queued → cloning → detecting → installing / running
-                                       │
-                          success ─────┴───── failure
-                             │                   │
-                        succeeded          fixing ⇄ installing / running   (up to 5x)
-                                                   │
-                                     success ──────┴────── exhausted
-                                        │                     │
-                                   succeeded               failed
+queued → cloning → detecting → installing → running
+                                     │
+                        running ─────┴───── failure
+                           │                   │
+                      succeeded          fixing ⇄ installing / running   (up to 5 attempts)
+                                                 │
+                             running ────────────┼──────── reflection: stop ──── exhausted
+                                │                 │              │                    │
+                           succeeded         (loop again)   failed_unfixable       failed
 
-  no manifest found / Pipenv / monorepo detected → unsupported_stack (no attempt made)
+  structural / detection stops (no fix loop, no install attempt):
+    no supported manifest / Pipenv / monorepo   → unsupported_stack
+    manifest doesn't parse                       → invalid_manifest
+    requirements.txt vs pyproject.toml disagree  → conflicting_manifests
+    engines.node incompatible with node:20       → engine_version_mismatch
 ```
 
-## Isolation & security model
+## Evals
 
-- Every job gets its own container; no host volume mounts; containers are destroyed once the job ends
-- Memory, CPU, and process-count limits on every container; `no-new-privileges` set
-- The AI never receives shell or SSH access — only three named tools (`read_file`, `write_file`,
-  `run_command`), and `pipeline.ts` strips absolute paths and `../` traversal before touching the
-  container
-- Every job and report route checks `job.userId === req.userId` — a 404, not a 403, on mismatch, so
-  job existence isn't leaked to other users
-- File writes from the fix loop are base64-encoded before being written inside the container, so
-  arbitrary AI-authored content never needs shell-escaping
+`/evals/` is a small harness that runs a fixed set of known public repos through the **real** pipeline
+and records how the system actually performs — success/failure comes from the job's own terminal
+status, never from the model grading itself. Run it with `npm run eval` (from `backend/`); it writes a
+timestamped JSON file to `evals/results/` and regenerates **[`evals/report.md`](evals/report.md)**.
 
-## Out of scope (by design)
-
-This is an MVP, not a hardened platform. Explicitly not supported:
-
-- Private repos, GitHub OAuth, PR auto-creation, batch processing, CI integration
-- Languages other than Node.js and Python
-- Full monorepo support, Pipenv (both are detected and reported clearly rather than attempted)
+In the last recorded run ([`evals/report.md`](evals/report.md)): **3 of 8** fixtures matched their
+expected classification, and **1 of 8 (~13%)** ended up running. Important caveat — that run was
+executed **without an `OPENAI_API_KEY`**, so the AI diagnose/fix/reflect steps fell back to their no-op
+defaults. It therefore exercises the clone → detect → validate → install → run path and the structural
+guards, but **not** the model-driven fixing (the one repo that ran needed no fix). Re-run with a key
+set for numbers that reflect the fix loop. The failing fixtures are genuine findings, not harness bugs
+(e.g. two Heroku samples pin an `engines.node` range incompatible with `node:20`).
 
 ## Known limitations
 
-- **No `OPENAI_API_KEY`?** The app still runs — every failure just cycles through 5 quick, gracefully-failing
-  diagnosis attempts (each ends in `category: "unknown"`) before marking the job `failed`, in a few
-  seconds rather than hanging.
-- **SQLite** means single-instance only — fine for a demo, not for horizontal scaling.
-- **The fix loop's diff isn't a true patch** — it's a unified diff for the report, generated from
-  before/after file snapshots, not something meant to be reapplied with `git apply`.
+- **No `OPENAI_API_KEY`?** The app still runs, but diagnosis, fixing, and reflection all fall back to
+  safe no-op defaults — failing jobs just cycle to a clean `failed` in a few seconds instead of being
+  fixed.
+- **Public repos only.** No private repos, no GitHub OAuth, no package-registry authentication.
+- **Node and Python only.** Go is a stretch goal, not implemented — any other language ends as
+  `unsupported_stack`.
+- **No monorepo support.** Workspaces / Lerna / Nx / Pipenv repos are detected and reported clearly,
+  but not built.
+- **Docker-level isolation only.** Containers are resource-limited and host-isolated, but network is
+  open (needed for clone/install) and this is not microVM-grade sandboxing.
+- **Single-server execution.** SQLite + an in-process queue means one instance — there's no
+  distributed queue or horizontal scaling.
+- **The report diff isn't a reappliable patch.** It's a unified diff generated from before/after file
+  snapshots for readability, not something meant for `git apply`.
+
+## Out of scope (by design)
+
+This is an MVP, not a hardened platform. Explicitly not built: private repos, GitHub OAuth, PR
+auto-creation, batch/CI integration, languages beyond Node and Python, full monorepo/Pipenv builds,
+and multi-instance/distributed execution.
 
 ## License
 
